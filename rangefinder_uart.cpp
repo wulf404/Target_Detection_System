@@ -1,0 +1,205 @@
+#include "rangefinder_uart.h"
+#include <iostream>
+#include <QFile>
+#include <QThread>
+#include <QTimer>
+#include <QTimer>
+
+RangefinderUart::RangefinderUart(const QString& port, QObject* parent)
+    : QObject(parent), sp(new QSerialPort(this))
+{
+    QString dev = port.startsWith("/dev/") ? port : ("/dev/" + port);
+
+    sp->setPortName(dev);
+    sp->setBaudRate(QSerialPort::Baud115200);
+    sp->setDataBits(QSerialPort::Data8);
+    sp->setParity(QSerialPort::NoParity);
+    sp->setStopBits(QSerialPort::OneStop);
+    sp->setFlowControl(QSerialPort::NoFlowControl);
+
+    connect(sp, &QSerialPort::readyRead, this, &RangefinderUart::onReadyRead);
+    connect(sp, &QSerialPort::errorOccurred, this, &RangefinderUart::onError);
+}
+
+RangefinderUart::~RangefinderUart() {
+    if (sp && sp->isOpen()) sp->close();
+}
+
+bool RangefinderUart::start()
+{
+    if (!sp) return false;
+
+    if (sp->isOpen()) {
+        std::cout << "[RF] Port already open:" << std::endl;
+        return true;
+    }
+
+    QString portPath = "/dev/ttyUSB0";
+    if (!QFile::exists(portPath)) {
+        std::cout << "[RF] Port" << "not found, retrying..." << std::endl;
+        QTimer::singleShot(1000, this, [this]() { this->start(); });
+        return false;
+    }
+
+    sp->setPortName(portPath);
+    sp->setBaudRate(QSerialPort::Baud115200);
+    sp->setDataBits(QSerialPort::Data8);
+    sp->setParity(QSerialPort::NoParity);
+    sp->setStopBits(QSerialPort::OneStop);
+    sp->setFlowControl(QSerialPort::NoFlowControl);
+
+    QThread::msleep(200);                 // дать чипу инициализироваться
+    if (!sp->open(QIODevice::ReadWrite)) {
+        emit errorText("Can't open " + sp->portName() + ": " + sp->errorString());
+        QTimer::singleShot(1000, this, [this]() { this->start(); });
+        return false;
+    }
+
+    sp->clear(QSerialPort::AllDirections);  // очистить мусор в RX/TX
+    QThread::msleep(100);
+
+    std::cout << "[RF] Port opened:" << std::endl;
+    this->startContinuous();
+    return true;
+}
+
+void RangefinderUart::stop() {
+    if (sp && sp->isOpen()) {
+        sp->close();
+        std::cout << "[RF] Port closed" << std::endl;
+    }
+}
+
+void RangefinderUart::startContinuous() {
+    if (!sp || !sp->isOpen()) {
+        emit errorText("Port not open, can't startContinuous()");
+        return;
+    }
+    QByteArray cmd;
+    cmd.append(char(0xFA));
+    cmd.append(char(0x01));
+    cmd.append(char(0xFF));
+    cmd.append(char(0x04));
+    cmd.append(char(0x01));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0xFF));
+
+    uint8_t crc = 0;
+    for (int i = 0; i < cmd.size(); ++i) crc += (uint8_t)cmd[i];
+    cmd.append(crc);
+
+    sp->write(cmd);
+    sp->flush();
+    std::cout << "[RF] Sent Start Continuous command" << std::endl;
+}
+
+
+void RangefinderUart::stopMeasurement() {
+    if (!sp || !sp->isOpen()) {
+        emit errorText("Port not open, can't stopMeasurement()");
+        return;
+    }
+    QByteArray cmd;
+    cmd.append(char(0xFA));
+    cmd.append(char(0x01));
+    cmd.append(char(0xFF));
+    cmd.append(char(0x04));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0x00));
+    cmd.append(char(0xFE));
+
+    uint8_t crc = 0;
+    for (int i = 0; i < cmd.size(); ++i) crc += (uint8_t)cmd[i];
+    cmd.append(crc);
+
+    sp->write(cmd);
+    sp->flush();
+    std::cout << "[RF] Sent Stop Measurement command" << std::endl;
+}
+
+void RangefinderUart::onReadyRead()
+{
+    if (!sp || !sp->isOpen())
+        return;
+
+    buffer += sp->readAll();
+
+    // если буфер слишком большой — сбрасываем мусор
+    if (buffer.size() > 256) {
+        //qWarning() << "[RF] Buffer overflow, clearing garbage";
+        buffer.clear();
+        return;
+    }
+
+    // ищем валидный пакет
+    while (buffer.size() >= 9) {
+        // ищем байт начала пакета
+        if ((uint8_t)buffer[0] != 0xFB) {
+            buffer.remove(0, 1);
+            continue;
+        }
+
+        // ждём пока придёт весь пакет
+        if (buffer.size() < 9)
+            return;
+
+        QByteArray pkt = buffer.left(9);
+        buffer.remove(0, 9);
+
+        // вычисляем CRC
+        uint8_t crc_calc = 0;
+        for (int i = 0; i < 8; ++i)
+            crc_calc += (uint8_t)pkt[i];
+        uint8_t crc_recv = (uint8_t)pkt[8];
+
+        // защита от ошибочных пакетов
+        static int crc_fail_count = 0;
+        if (crc_calc != crc_recv) {
+            crc_fail_count++;
+            //qWarning() << "[RF] CRC mismatch:" << crc_calc << crc_recv;
+            if (crc_fail_count > 5) {
+                //qWarning() << "[RF] Too many CRC errors, restarting port...";
+                crc_fail_count = 0;
+                sp->close();
+                QTimer::singleShot(500, this, [this]() { this->start(); });
+            }
+            continue;
+        }
+        crc_fail_count = 0;
+
+        uint8_t msgType = (uint8_t)pkt[0];
+        uint8_t msgCode = (uint8_t)pkt[1];
+        uint16_t dist = ((uint8_t)pkt[7] << 8) | (uint8_t)pkt[6];
+
+        if (msgType == 0xFB && msgCode == 0x03) {
+            if (dist == 0) {
+               // qDebug() << "[RF] No object";
+            } else if (dist == 0xFFFF) {
+                //qDebug() << "[RF] Open space";
+            } else {
+                int mm = dist * 100;
+                emit distanceReady(mm);
+            }
+        } else {
+            //qDebug() << "[RF RAW]" << pkt.toHex();
+        }
+    }
+}
+
+
+void RangefinderUart::onError(QSerialPort::SerialPortError err) {
+    if (err == QSerialPort::NoError) return;
+
+    std::cerr << "[RF ERROR] " << sp->errorString().toStdString() << std::endl;
+
+
+    // Автоматически переподключимся через секунду
+    sp->close();
+    QTimer::singleShot(1000, this, [this]() { this->start(); });
+}
