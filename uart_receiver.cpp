@@ -142,24 +142,23 @@ void UartReceiver::start()
 
     std::cerr << "[UART] receiver loop entered\n";
     bool reported_wait = false;
+    QString last_usb_summary;
+    QString last_selected_port;
+    QString last_open_error;
 
     while (!m_stop.load(std::memory_order_relaxed))
     {
-        const auto port = serial_ports::findPort(serial_ports::Role::CoordinateSource);
-        if (!port) {
-            if (!reported_wait) {
-                emit error(QString("Waiting for cp210x coordinate source USB serial port"));
-                reported_wait = true;
-            }
-            waitBeforeReconnect(RECONNECT_DELAY_MS);
-            continue;
+        const QVector<serial_ports::PortInfo> ports = serial_ports::listUsbSerialPorts();
+        const QString usb_summary = serial_ports::describeList(ports);
+        if (usb_summary != last_usb_summary) {
+            last_usb_summary = usb_summary;
+            emit status("[USB] ttyUSB devices: " + usb_summary);
         }
 
-        const QByteArray devicePathBytes = port->devicePath.toLocal8Bit();
-        const int fd = open(devicePathBytes.constData(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
-        if (fd < 0) {
+        const auto port = serial_ports::findPort(serial_ports::Role::CoordinateSource, ports);
+        if (!port) {
             if (!reported_wait) {
-                emit error(QString("Waiting for %1: %2").arg(port->devicePath).arg(strerror(errno)));
+                emit status(QString("[UART] Waiting for cp210x coordinate source USB serial port"));
                 reported_wait = true;
             }
             waitBeforeReconnect(RECONNECT_DELAY_MS);
@@ -167,6 +166,28 @@ void UartReceiver::start()
         }
 
         reported_wait = false;
+
+        const QString selectedPort = serial_ports::describe(*port);
+        if (selectedPort != last_selected_port) {
+            last_selected_port = selectedPort;
+            emit status("[UART] Selected coordinate source: " + selectedPort);
+        }
+
+        const QByteArray devicePathBytes = port->devicePath.toLocal8Bit();
+        const int fd = open(devicePathBytes.constData(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
+        if (fd < 0) {
+            const QString open_error = QString("Waiting for %1: %2")
+                                           .arg(port->devicePath)
+                                           .arg(strerror(errno));
+            if (open_error != last_open_error) {
+                last_open_error = open_error;
+                emit error(open_error);
+            }
+            waitBeforeReconnect(RECONNECT_DELAY_MS);
+            continue;
+        }
+
+        last_open_error.clear();
 
         if (!configurePort(fd, port->devicePath)) {
             close(fd);
@@ -177,6 +198,7 @@ void UartReceiver::start()
         std::cout << "[UART] "
                   << serial_ports::describe(*port).toStdString()
                   << " opened" << std::endl;
+        emit status("[UART] Opened coordinate source: " + selectedPort);
         const bool should_reconnect = readFromOpenPort(fd, port->devicePath);
         close(fd);
 
@@ -185,6 +207,7 @@ void UartReceiver::start()
         }
 
         if (should_reconnect) {
+            emit status("[UART] Coordinate source disconnected, rescanning USB");
             emit pixelsReceived(0, 0, false);
             waitBeforeReconnect(RECONNECT_DELAY_MS);
         }

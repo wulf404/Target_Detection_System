@@ -18,6 +18,7 @@ public slots:
 
 signals:
     void error(QString msg);
+    void status(QString msg);
     void pixelsReceived(int x, int y, bool valid);
 
 private:

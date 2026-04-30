@@ -1,7 +1,6 @@
 #include "auto_tracker.h"
 #include "can_work.h"
 #include "tower_state.h"
-#include "tracking_state.h"
 #include "turret_command.h"
 
 #include <cmath>
@@ -34,8 +33,6 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
 {
     if (!g_can) return;
     if (frameSize.width <= 0 || frameSize.height <= 0) return;
-
-    updateMainCamSeen(true);
 
     static constexpr double REACH_EPS_DEG = 0.10;
     static constexpr int SEND_PERIOD_MS = 20;

@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QSerialPort>
+#include <QString>
 #include <QTimer>
 
 class RangefinderUart : public QObject {
@@ -26,8 +27,11 @@ private slots:
 
 private:
     void scheduleRetry(int delay_ms);
+    void reportUsbPorts(const QString& summary);
 
     QSerialPort* sp = nullptr;
     QByteArray buffer;
+    QString lastUsbSummary;
+    QString lastSelectedPort;
     bool retryScheduled = false;
 };

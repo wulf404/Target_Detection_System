@@ -1,6 +1,5 @@
 #include "my_yolo.h"
-#include "auto_tracker.h"
-#include "tracking_state.h"
+#include "target_manager.h"
 
 #include <algorithm>
 #include <cmath>
@@ -309,7 +308,7 @@ yolo_output my_yolo::run(cv::Mat &frame)
 
     if (selected >= 0) {
         const TargetCandidate& target = candidates[selected];
-        AutoTracker::processPixelCenter(target.center, frame.size());
+        TargetManager::submitCameraTarget(target.center, frame.size());
 
         last_target_center = target.center;
         have_last_target = true;
@@ -318,7 +317,7 @@ yolo_output my_yolo::run(cv::Mat &frame)
         if (have_last_target && ++lost_target_frames > TARGET_MEMORY_FRAMES) {
             have_last_target = false;
         }
-        updateMainCamSeen(false);
+        TargetManager::submitCameraMiss();
     }
     tm_drawpack.stop();
 

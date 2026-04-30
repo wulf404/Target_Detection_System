@@ -146,6 +146,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(uart, &UartReceiver::error, this, [this](const QString& msg){
         MY_CONSOLE_A("[UART ERROR] " + msg);
     });
+    connect(uart, &UartReceiver::status, this, [this](const QString& msg){
+        MY_CONSOLE_A(msg);
+    });
 
     th->start();
 

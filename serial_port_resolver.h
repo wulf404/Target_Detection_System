@@ -27,6 +27,8 @@ struct PortInfo
 
 QVector<PortInfo> listUsbSerialPorts();
 std::optional<PortInfo> findPort(Role role);
+std::optional<PortInfo> findPort(Role role, const QVector<PortInfo>& ports);
 QString describe(const PortInfo& port);
+QString describeList(const QVector<PortInfo>& ports);
 
 } // namespace serial_ports

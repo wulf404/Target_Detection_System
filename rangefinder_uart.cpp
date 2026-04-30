@@ -38,6 +38,16 @@ void RangefinderUart::scheduleRetry(int delay_ms)
     });
 }
 
+void RangefinderUart::reportUsbPorts(const QString& summary)
+{
+    if (summary == lastUsbSummary) {
+        return;
+    }
+
+    lastUsbSummary = summary;
+    emit errorText("[USB] ttyUSB devices: " + summary);
+}
+
 bool RangefinderUart::start()
 {
     if (!sp) return false;
@@ -47,11 +57,20 @@ bool RangefinderUart::start()
         return true;
     }
 
-    const auto port = serial_ports::findPort(serial_ports::Role::Rangefinder);
+    const QVector<serial_ports::PortInfo> ports = serial_ports::listUsbSerialPorts();
+    reportUsbPorts(serial_ports::describeList(ports));
+
+    const auto port = serial_ports::findPort(serial_ports::Role::Rangefinder, ports);
     if (!port) {
         emit errorText("[RF] Waiting for FT232BM rangefinder USB serial port");
         scheduleRetry(1000);
         return false;
+    }
+
+    const QString selectedPort = serial_ports::describe(*port);
+    if (selectedPort != lastSelectedPort) {
+        lastSelectedPort = selectedPort;
+        emit errorText("[RF] Selected rangefinder: " + selectedPort);
     }
 
     sp->setPortName(port->devicePath);
@@ -63,7 +82,7 @@ bool RangefinderUart::start()
 
     QThread::msleep(200);                 // дать чипу инициализироваться
     if (!sp->open(QIODevice::ReadWrite)) {
-        emit errorText("Can't open " + sp->portName() + ": " + sp->errorString());
+        emit errorText("[RF] Can't open " + sp->portName() + ": " + sp->errorString());
         scheduleRetry(1000);
         return false;
     }
@@ -72,6 +91,7 @@ bool RangefinderUart::start()
     QThread::msleep(100);
 
     retryScheduled = false;
+    emit errorText("[RF] Opened rangefinder: " + selectedPort);
     std::cout << "[RF] Port opened: "
               << serial_ports::describe(*port).toStdString()
               << std::endl;
@@ -81,6 +101,7 @@ bool RangefinderUart::start()
 
 void RangefinderUart::stop() {
     if (sp && sp->isOpen()) {
+        emit errorText("[RF] Port closed: " + sp->portName());
         sp->close();
         std::cout << "[RF] Port closed" << std::endl;
     }
@@ -182,6 +203,7 @@ void RangefinderUart::onReadyRead()
             if (crc_fail_count > 5) {
                 //qWarning() << "[RF] Too many CRC errors, restarting port...";
                 crc_fail_count = 0;
+                emit errorText("[RF] Too many CRC errors on " + sp->portName() + ", reopening");
                 sp->close();
                 scheduleRetry(500);
             }
@@ -212,10 +234,16 @@ void RangefinderUart::onReadyRead()
 void RangefinderUart::onError(QSerialPort::SerialPortError err) {
     if (err == QSerialPort::NoError) return;
 
-    std::cerr << "[RF ERROR] " << sp->errorString().toStdString() << std::endl;
+    const QString portName = sp ? sp->portName() : QString("?");
+    const QString errorString = sp ? sp->errorString() : QString("unknown serial error");
+    emit errorText("[RF] Serial error on " + portName + ": " + errorString + ". Rescanning USB");
+
+    std::cerr << "[RF ERROR] " << errorString.toStdString() << std::endl;
 
 
     // Автоматически переподключимся через секунду
-    sp->close();
+    if (sp) {
+        sp->close();
+    }
     scheduleRetry(1000);
 }

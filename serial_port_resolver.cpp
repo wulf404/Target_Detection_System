@@ -6,8 +6,6 @@
 #include <QIODevice>
 #include <QStringList>
 
-#include <algorithm>
-
 namespace serial_ports {
 namespace {
 
@@ -59,6 +57,11 @@ QString driverName(const QString& ttySysfsPath)
 bool containsCI(const QString& text, const QString& needle)
 {
     return text.contains(needle, Qt::CaseInsensitive);
+}
+
+QString present(const QString& value)
+{
+    return value.isEmpty() ? QStringLiteral("?") : value;
 }
 
 int scoreForRole(const PortInfo& port, Role role)
@@ -122,7 +125,11 @@ QVector<PortInfo> listUsbSerialPorts()
 std::optional<PortInfo> findPort(Role role)
 {
     const QVector<PortInfo> ports = listUsbSerialPorts();
+    return findPort(role, ports);
+}
 
+std::optional<PortInfo> findPort(Role role, const QVector<PortInfo>& ports)
+{
     int bestScore = 0;
     std::optional<PortInfo> best;
     for (const PortInfo& port : ports) {
@@ -138,13 +145,29 @@ std::optional<PortInfo> findPort(Role role)
 
 QString describe(const PortInfo& port)
 {
-    return QString("%1 driver=%2 product=%3 manufacturer=%4 vid=%5 pid=%6")
-        .arg(port.devicePath,
-             port.driver,
-             port.product,
-             port.manufacturer,
-             port.idVendor,
-             port.idProduct);
+    return QString("%1 driver=%2 product=%3 manufacturer=%4 vid=%5 pid=%6 serial=%7")
+        .arg(port.devicePath)
+        .arg(present(port.driver))
+        .arg(present(port.product))
+        .arg(present(port.manufacturer))
+        .arg(present(port.idVendor))
+        .arg(present(port.idProduct))
+        .arg(present(port.serial));
+}
+
+QString describeList(const QVector<PortInfo>& ports)
+{
+    if (ports.isEmpty()) {
+        return "no ttyUSB devices";
+    }
+
+    QStringList items;
+    items.reserve(ports.size());
+    for (const PortInfo& port : ports) {
+        items.push_back(describe(port));
+    }
+
+    return items.join("; ");
 }
 
 } // namespace serial_ports
