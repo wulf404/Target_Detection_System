@@ -25,6 +25,9 @@ private slots:
 
 
 private:
+    void scheduleRetry(int delay_ms);
+
     QSerialPort* sp = nullptr;
     QByteArray buffer;
+    bool retryScheduled = false;
 };

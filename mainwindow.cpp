@@ -108,28 +108,10 @@ MainWindow::MainWindow(QWidget *parent)
     for (const auto &can_dev : can_devices)
         ui->cbCan->addItem(can_dev);
 
-    rf = new RangefinderUart("ttyUSB0", this);
-
-    // УМНЫЙ СТАРТ ДАЛЬНОМЕРА
-    QTimer *uartWaiter = new QTimer(this);
-    connect(uartWaiter, &QTimer::timeout, this, [this, uartWaiter]() {
-        if (QFile::exists("/dev/ttyUSB0")) {
-            uartWaiter->stop();
-            uartWaiter->deleteLater();
-
-            if (rf && rf->start()) {
-                connect(rf, &RangefinderUart::distanceReady, this, &MainWindow::showDistance);
-                connect(rf, &RangefinderUart::errorText,     this, &MainWindow::showStatus);
-                MY_CONSOLE_A("[RF] started ok");
-            } else {
-                MY_CONSOLE_A("[RF] not ready, retrying...");
-                QTimer::singleShot(1000, this, [this]() {
-                    if (rf) rf->start();
-                });
-            }
-        }
-    });
-    uartWaiter->start(200);
+    rf = new RangefinderUart("auto", this);
+    connect(rf, &RangefinderUart::distanceReady, this, &MainWindow::showDistance);
+    connect(rf, &RangefinderUart::errorText,     this, &MainWindow::showStatus);
+    rf->start();
 
     // УМНЫЙ СТАРТ CAN
     QTimer *canWaiter = new QTimer(this);

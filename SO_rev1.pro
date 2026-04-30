@@ -22,6 +22,7 @@ SOURCES += \
     my_yolo.cpp \
     rangefinder_uart.cpp \
     remote_tracker.cpp \
+    serial_port_resolver.cpp \
     tower_state.cpp \
     turret_command.cpp \
     tracking_state.cpp \
@@ -40,6 +41,7 @@ HEADERS += \
     my_yolo.h \
     rangefinder_uart.h \
     remote_tracker.h \
+    serial_port_resolver.h \
     tower_state.h \
     turret_command.h \
     tracking_state.h \

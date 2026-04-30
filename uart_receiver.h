@@ -21,8 +21,8 @@ signals:
     void pixelsReceived(int x, int y, bool valid);
 
 private:
-    bool configurePort(int fd);
-    bool readFromOpenPort(int fd);
+    bool configurePort(int fd, const QString& devicePath);
+    bool readFromOpenPort(int fd, const QString& devicePath);
     bool waitBeforeReconnect(int delay_ms);
 
     std::atomic<bool> m_stop{false};
