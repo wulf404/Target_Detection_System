@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QString>
 
+#include <atomic>
+
 class UartReceiver : public QObject
 {
     Q_OBJECT
@@ -19,7 +21,11 @@ signals:
     void pixelsReceived(int x, int y, bool valid);
 
 private:
-    bool m_stop = false;
+    bool configurePort(int fd);
+    bool readFromOpenPort(int fd);
+    bool waitBeforeReconnect(int delay_ms);
+
+    std::atomic<bool> m_stop{false};
 };
 
 #endif // UART_RECEIVER_H

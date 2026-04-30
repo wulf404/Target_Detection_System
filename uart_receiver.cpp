@@ -1,12 +1,22 @@
 #include "uart_receiver.h"
-#include <iostream>
-#include <iomanip>
-#include <fcntl.h>
-#include <termios.h>
-#include <unistd.h>
+
 #include <cerrno>
-#include <cstring>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <poll.h>
+#include <termios.h>
+#include <thread>
+#include <unistd.h>
+
+namespace {
+constexpr const char* UART_DEVICE = "/dev/ttyUSB1";
+constexpr int RECONNECT_DELAY_MS = 1000;
+constexpr int POLL_TIMEOUT_MS = 50;
+}
 
 UartReceiver::UartReceiver(QObject* parent)
     : QObject(parent)
@@ -15,23 +25,29 @@ UartReceiver::UartReceiver(QObject* parent)
 
 void UartReceiver::stop()
 {
-    m_stop = true;
+    m_stop.store(true, std::memory_order_relaxed);
 }
 
-void UartReceiver::start()
+bool UartReceiver::waitBeforeReconnect(int delay_ms)
 {
+    constexpr int STEP_MS = 50;
+    int waited_ms = 0;
 
-
-    std::cerr << "[UART] start() entered\n";
-    const char* device = "/dev/ttyUSB1";
-    int fd = open(device, O_RDONLY | O_NOCTTY);
-    if (fd < 0) {
-        emit error(QString("Ошибка открытия %1: %2").arg(device).arg(strerror(errno)));
-        return;
+    while (!m_stop.load(std::memory_order_relaxed) && waited_ms < delay_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(STEP_MS));
+        waited_ms += STEP_MS;
     }
 
-    struct termios tty{};
-    tcgetattr(fd, &tty);
+    return !m_stop.load(std::memory_order_relaxed);
+}
+
+bool UartReceiver::configurePort(int fd)
+{
+    termios tty{};
+    if (tcgetattr(fd, &tty) != 0) {
+        emit error(QString("tcgetattr %1 failed: %2").arg(UART_DEVICE).arg(strerror(errno)));
+        return false;
+    }
 
     cfsetispeed(&tty, B921600);
     cfsetospeed(&tty, B921600);
@@ -45,26 +61,58 @@ void UartReceiver::start()
     tty.c_iflag &= ~(IXON | IXOFF | IXANY);
     tty.c_lflag = 0;
     tty.c_oflag = 0;
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 0;
 
-    tcsetattr(fd, TCSANOW, &tty);
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+        emit error(QString("tcsetattr %1 failed: %2").arg(UART_DEVICE).arg(strerror(errno)));
+        return false;
+    }
 
-    std::cout << "[UART] Приём координат запущен" << std::endl;
+    return true;
+}
 
-    uint8_t buf[4];
-    size_t received = 0;
+bool UartReceiver::readFromOpenPort(int fd)
+{
+    std::uint8_t buf[4]{};
+    std::size_t received = 0;
 
-    while (!m_stop)
+    while (!m_stop.load(std::memory_order_relaxed))
     {
-        ssize_t n = read(fd, buf + received, 4 - received);
+        pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+
+        const int ready = poll(&pfd, 1, POLL_TIMEOUT_MS);
+        if (ready == 0) {
+            continue;
+        }
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            emit error(QString("poll %1 failed: %2").arg(UART_DEVICE).arg(strerror(errno)));
+            return true;
+        }
+
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            emit error(QString("%1 disconnected").arg(UART_DEVICE));
+            return true;
+        }
+        if (!(pfd.revents & POLLIN)) {
+            continue;
+        }
+
+        const ssize_t n = read(fd, buf + received, sizeof(buf) - received);
         if (n > 0)
         {
-            received += n;
-            if (received == 4)
+            received += static_cast<std::size_t>(n);
+            if (received == sizeof(buf))
             {
                 received = 0;
 
-                int16_t x = (int16_t)((buf[0] << 8) | buf[1]);
-                int16_t y = (int16_t)((buf[2] << 8) | buf[3]);
+                const auto raw_x = static_cast<std::uint16_t>((buf[0] << 8) | buf[1]);
+                const auto raw_y = static_cast<std::uint16_t>((buf[2] << 8) | buf[3]);
+                const auto x = static_cast<std::int16_t>(raw_x);
+                const auto y = static_cast<std::int16_t>(raw_y);
 
                 if (x == -1 && y == -1) {
                     emit pixelsReceived(0, 0, false);
@@ -72,17 +120,62 @@ void UartReceiver::start()
                 }
 
                 emit pixelsReceived(x, y, true);
-                //std::cout << "[UART] x=" << std::setw(6) << x
-                //          << "  y=" << std::setw(6) << y << std::endl;
             }
         }
-        else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+        else if (n == 0) {
+            emit error(QString("%1 returned EOF").arg(UART_DEVICE));
+            return true;
+        }
+        else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
         {
-            emit error(QString("Ошибка чтения: %1").arg(strerror(errno)));
-            break;
+            emit error(QString("read %1 failed: %2").arg(UART_DEVICE).arg(strerror(errno)));
+            return true;
         }
     }
 
-    close(fd);
-    std::cout << "[UART] Приём остановлен" << std::endl;
+    return false;
+}
+
+void UartReceiver::start()
+{
+    m_stop.store(false, std::memory_order_relaxed);
+
+    std::cerr << "[UART] receiver loop entered\n";
+    bool reported_wait = false;
+
+    while (!m_stop.load(std::memory_order_relaxed))
+    {
+        const int fd = open(UART_DEVICE, O_RDONLY | O_NOCTTY | O_NONBLOCK);
+        if (fd < 0) {
+            if (!reported_wait) {
+                emit error(QString("Waiting for %1: %2").arg(UART_DEVICE).arg(strerror(errno)));
+                reported_wait = true;
+            }
+            waitBeforeReconnect(RECONNECT_DELAY_MS);
+            continue;
+        }
+
+        reported_wait = false;
+
+        if (!configurePort(fd)) {
+            close(fd);
+            waitBeforeReconnect(RECONNECT_DELAY_MS);
+            continue;
+        }
+
+        std::cout << "[UART] " << UART_DEVICE << " opened" << std::endl;
+        const bool should_reconnect = readFromOpenPort(fd);
+        close(fd);
+
+        if (m_stop.load(std::memory_order_relaxed)) {
+            break;
+        }
+
+        if (should_reconnect) {
+            emit pixelsReceived(0, 0, false);
+            waitBeforeReconnect(RECONNECT_DELAY_MS);
+        }
+    }
+
+    std::cout << "[UART] receiver loop stopped" << std::endl;
 }

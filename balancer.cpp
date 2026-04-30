@@ -10,7 +10,7 @@ Balancer::Balancer(QObject *parent) : QObject(parent)
     tp->setMaxThreadCount(2);
 
     camera = new Camera(this, 1920);   //  FullHD/4K
-    camera->setAutoDelete(1);
+    camera->setAutoDelete(false);
 
     connect(this, &Balancer::stopTasks,  camera, &Camera::Stop);
     connect(this, &Balancer::closeTasks, camera, &Camera::deleteLater);

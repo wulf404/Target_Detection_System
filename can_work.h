@@ -63,7 +63,7 @@ private:
     int mSock;
     bool isOpen;
     bool isRecv;
-    const char* m_canName;
+    std::string m_canName;
     struct can_frame mFrame;
 
     std::atomic<bool> stop_flag;

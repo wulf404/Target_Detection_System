@@ -1,7 +1,31 @@
 #include "can_work.h"
 #include "tower_state.h"
 
-can_work::can_work(const char *canName) : m_canName(canName)
+#include <cstdio>
+#include <cstdint>
+
+static uint16_t readBitsBE(const std::vector<uchar>& bits, int start, int count)
+{
+    uint16_t value = 0;
+    for (int i = 0; i < count; ++i) {
+        if (bits[start + i]) {
+            value |= static_cast<uint16_t>(1u << (count - 1 - i));
+        }
+    }
+    return value;
+}
+
+static uint16_t readU16BitsBE(const std::vector<uchar>& bits, int start)
+{
+    return readBitsBE(bits, start, 16);
+}
+
+static int16_t readI16BitsBE(const std::vector<uchar>& bits, int start)
+{
+    return static_cast<int16_t>(readU16BitsBE(bits, start));
+}
+
+can_work::can_work(const char *canName) : m_canName(canName ? canName : "")
 {
     stop_flag.store(0);
     isOpen = openCan();
@@ -87,7 +111,7 @@ bool can_work::openCan()
     }
     else std::cerr << "opening socket " << mSock << "\n";
 
-    strcpy(ifr.ifr_name, m_canName);
+    std::snprintf(ifr.ifr_name, IFNAMSIZ, "%s", m_canName.c_str());
     ioctl(mSock, SIOCGIFINDEX, &ifr);
 
     addr.can_family  = AF_CAN;
@@ -243,22 +267,7 @@ void can_work::analysisMsg()
             }
             else
             {
-                //вероятно, это можно как то оптимизировать
-                uint16_t time = 0;
-                msgData_bin[23] ? time += 1    : time += 0;
-                msgData_bin[22] ? time += 2    : time += 0;
-                msgData_bin[21] ? time += 4    : time += 0;
-                msgData_bin[20] ? time += 8    : time += 0;
-                msgData_bin[19] ? time += 16   : time += 0;
-                msgData_bin[18] ? time += 32   : time += 0;
-                msgData_bin[17] ? time += 64   : time += 0;
-                msgData_bin[16] ? time += 128  : time += 0;
-                msgData_bin[15] ? time += 256  : time += 0;
-                msgData_bin[14] ? time += 512  : time += 0;
-                msgData_bin[13] ? time += 1024 : time += 0;
-                msgData_bin[12] ? time += 2048 : time += 0;
-                msgData_bin[11] ? time += 4096 : time += 0;
-                msgData_bin[10] ? time += 8192 : time += 0;
+                uint16_t time = readBitsBE(msgData_bin, 10, 14);
                 if (time > 9999)
                 {
                     appendConsole("Наработка больше 9999 часов!");
@@ -328,26 +337,7 @@ void can_work::analysisMsg()
         // ================== АЗИМУТ ===========================
         // bits [8..23] → int16_t (сотые градуса)
         // =====================================================
-        uint16_t raw_az = 0;
-
-        if (msgData_bin[23]) raw_az |= (1 << 0);
-        if (msgData_bin[22]) raw_az |= (1 << 1);
-        if (msgData_bin[21]) raw_az |= (1 << 2);
-        if (msgData_bin[20]) raw_az |= (1 << 3);
-        if (msgData_bin[19]) raw_az |= (1 << 4);
-        if (msgData_bin[18]) raw_az |= (1 << 5);
-        if (msgData_bin[17]) raw_az |= (1 << 6);
-        if (msgData_bin[16]) raw_az |= (1 << 7);
-        if (msgData_bin[15]) raw_az |= (1 << 8);
-        if (msgData_bin[14]) raw_az |= (1 << 9);
-        if (msgData_bin[13]) raw_az |= (1 << 10);
-        if (msgData_bin[12]) raw_az |= (1 << 11);
-        if (msgData_bin[11]) raw_az |= (1 << 12);
-        if (msgData_bin[10]) raw_az |= (1 << 13);
-        if (msgData_bin[9])  raw_az |= (1 << 14);
-        if (msgData_bin[8])  raw_az |= (1 << 15);
-
-        int16_t az = static_cast<int16_t>(raw_az);
+        const int16_t az = readI16BitsBE(msgData_bin, 8);
 
         if (std::abs(az) > 18000)
         {
@@ -367,26 +357,7 @@ void can_work::analysisMsg()
         }
 
 
-        uint16_t raw_el = 0;
-
-        if (msgData_bin[39]) raw_el |= (1 << 0);
-        if (msgData_bin[38]) raw_el |= (1 << 1);
-        if (msgData_bin[37]) raw_el |= (1 << 2);
-        if (msgData_bin[36]) raw_el |= (1 << 3);
-        if (msgData_bin[35]) raw_el |= (1 << 4);
-        if (msgData_bin[34]) raw_el |= (1 << 5);
-        if (msgData_bin[33]) raw_el |= (1 << 6);
-        if (msgData_bin[32]) raw_el |= (1 << 7);
-        if (msgData_bin[31]) raw_el |= (1 << 8);
-        if (msgData_bin[30]) raw_el |= (1 << 9);
-        if (msgData_bin[29]) raw_el |= (1 << 10);
-        if (msgData_bin[28]) raw_el |= (1 << 11);
-        if (msgData_bin[27]) raw_el |= (1 << 12);
-        if (msgData_bin[26]) raw_el |= (1 << 13);
-        if (msgData_bin[25]) raw_el |= (1 << 14);
-        if (msgData_bin[24]) raw_el |= (1 << 15);
-
-        int16_t el = static_cast<int16_t>(raw_el);
+        const int16_t el = readI16BitsBE(msgData_bin, 24);
 
         if (std::abs(el) > 4000)
         {
@@ -406,8 +377,7 @@ void can_work::analysisMsg()
         }
 
 
-        g_turret_az_deg = az / 100.0;
-        g_turret_el_deg = el / 100.0;
+        setTurretState(az / 100.0, el / 100.0);
 
 
         break;
@@ -449,27 +419,7 @@ void can_work::analysisMsg()
             msgData_bin[1] ? appendConsole("Пересечен рубеж 30м!") : appendConsole("Рубеж 30м не пересечен");
             msgData_bin[2] ? appendConsole("Есть запрос положения УПУ!"): appendConsole("Запроса положения УПУ нет");
 
-            //[8] - [23]
-            uint16_t coord1 = 0;
-
-            msgData_bin[23] ? coord1 += 1     : coord1 += 0;
-            msgData_bin[22] ? coord1 += 2     : coord1 += 0;
-            msgData_bin[21] ? coord1 += 4     : coord1 += 0;
-            msgData_bin[20] ? coord1 += 8     : coord1 += 0;
-            msgData_bin[19] ? coord1 += 16    : coord1 += 0;
-            msgData_bin[18] ? coord1 += 32    : coord1 += 0;
-            msgData_bin[17] ? coord1 += 64    : coord1 += 0;
-            msgData_bin[16] ? coord1 += 128   : coord1 += 0;
-            msgData_bin[15] ? coord1 += 256   : coord1 += 0;
-            msgData_bin[14] ? coord1 += 512   : coord1 += 0;
-            msgData_bin[13] ? coord1 += 1024  : coord1 += 0;
-            msgData_bin[12] ? coord1 += 2048  : coord1 += 0;
-            msgData_bin[11] ? coord1 += 4096  : coord1 += 0;
-            msgData_bin[10] ? coord1 += 8192  : coord1 += 0;
-            msgData_bin[9]  ? coord1 += 16384 : coord1 += 0;
-            msgData_bin[8]  ? coord1 += 32768 : coord1 += 0;
-
-            int16_t az = static_cast<int16_t>(coord1);
+            const int16_t az = readI16BitsBE(msgData_bin, 8);
 
             if (std::abs(az) > 18000)
             {
@@ -490,27 +440,7 @@ void can_work::analysisMsg()
                 insertConsole(" градусов");
             }
 
-            //[24] - [39]
-            uint16_t coord2 = 0;
-            msgData_bin[39] ? coord2 += 1     : coord2 += 0;
-            msgData_bin[38] ? coord2 += 2     : coord2 += 0;
-            msgData_bin[37] ? coord2 += 4     : coord2 += 0;
-            msgData_bin[36] ? coord2 += 8     : coord2 += 0;
-            msgData_bin[35] ? coord2 += 16    : coord2 += 0;
-            msgData_bin[34] ? coord2 += 32    : coord2 += 0;
-            msgData_bin[33] ? coord2 += 64    : coord2 += 0;
-            msgData_bin[32] ? coord2 += 128   : coord2 += 0;
-            msgData_bin[31] ? coord2 += 256   : coord2 += 0;
-            msgData_bin[30] ? coord2 += 512   : coord2 += 0;
-            msgData_bin[29] ? coord2 += 1024  : coord2 += 0;
-            msgData_bin[28] ? coord2 += 2048  : coord2 += 0;
-            msgData_bin[27] ? coord2 += 4096  : coord2 += 0;
-            msgData_bin[26] ? coord2 += 8192  : coord2 += 0;
-            msgData_bin[25] ? coord2 += 16384 : coord2 += 0;
-            msgData_bin[24] ? coord2 += 32768 : coord2 += 0;
-
-
-            int16_t el = static_cast<int16_t>(coord2);
+            const int16_t el = readI16BitsBE(msgData_bin, 24);
 
             if (std::abs(el) > 4000)
             {
@@ -539,24 +469,7 @@ void can_work::analysisMsg()
         else
         {
             appendConsole("Радиальная скорость движения цели:");
-            //[0] - [15]
-            int speed = 0;
-            msgData_bin[15] ? speed += 1     : speed += 0;
-            msgData_bin[14] ? speed += 2     : speed += 0;
-            msgData_bin[13] ? speed += 4     : speed += 0;
-            msgData_bin[12] ? speed += 8     : speed += 0;
-            msgData_bin[11] ? speed += 16    : speed += 0;
-            msgData_bin[10] ? speed += 32    : speed += 0;
-            msgData_bin[9]  ? speed += 64    : speed += 0;
-            msgData_bin[8]  ? speed += 128   : speed += 0;
-            msgData_bin[7]  ? speed += 256   : speed += 0;
-            msgData_bin[6]  ? speed += 512   : speed += 0;
-            msgData_bin[5]  ? speed += 1024  : speed += 0;
-            msgData_bin[4]  ? speed += 2048  : speed += 0;
-            msgData_bin[3]  ? speed += 4096  : speed += 0;
-            msgData_bin[2]  ? speed += 8192  : speed += 0;
-            msgData_bin[1]  ? speed += 16384 : speed += 0;
-            msgData_bin[0]  ? speed += 32768 : speed += 0;
+            int speed = readU16BitsBE(msgData_bin, 0);
 
             int speed_do = 0;
             int speed_posle = 0;
@@ -569,24 +482,7 @@ void can_work::analysisMsg()
             insertConsole(" м/с");
 
             appendConsole("Дальность до цели:");
-            //[16] - [31]
-            int distance = 0;
-            msgData_bin[31] ? distance += 1     : distance += 0;
-            msgData_bin[30] ? distance += 2     : distance += 0;
-            msgData_bin[29] ? distance += 4     : distance += 0;
-            msgData_bin[28] ? distance += 8     : distance += 0;
-            msgData_bin[27] ? distance += 16    : distance += 0;
-            msgData_bin[26] ? distance += 32    : distance += 0;
-            msgData_bin[25]  ? distance += 64    : distance += 0;
-            msgData_bin[24]  ? distance += 128   : distance += 0;
-            msgData_bin[23]  ? distance += 256   : distance += 0;
-            msgData_bin[22]  ? distance += 512   : distance += 0;
-            msgData_bin[21]  ? distance += 1024  : distance += 0;
-            msgData_bin[20]  ? distance += 2048  : distance += 0;
-            msgData_bin[19]  ? distance += 4096  : distance += 0;
-            msgData_bin[18]  ? distance += 8192  : distance += 0;
-            msgData_bin[17]  ? distance += 16384 : distance += 0;
-            msgData_bin[16]  ? distance += 32768 : distance += 0;
+            int distance = readU16BitsBE(msgData_bin, 16);
 
             int distance_do = 0;
             int distance_posle = 0;
@@ -650,11 +546,7 @@ void can_work::analysisMsg()
         }
         else
         {
-            uint8_t device = 0;
-            msgData_bin[4] ? device += 8 : device += 0;
-            msgData_bin[5] ? device += 4 : device += 0;
-            msgData_bin[6] ? device += 2 : device += 0;
-            msgData_bin[7] ? device += 1 : device += 0;
+            uint8_t device = static_cast<uint8_t>(readBitsBE(msgData_bin, 4, 4));
 
             switch (device)
             {
@@ -696,22 +588,7 @@ void can_work::analysisMsg()
             }
             else
             {
-                //вероятно, это можно как то оптимизировать
-                uint16_t time = 0;
-                msgData_bin[23] ? time += 1    : time += 0;
-                msgData_bin[22] ? time += 2    : time += 0;
-                msgData_bin[21] ? time += 4    : time += 0;
-                msgData_bin[20] ? time += 8    : time += 0;
-                msgData_bin[19] ? time += 16   : time += 0;
-                msgData_bin[18] ? time += 32   : time += 0;
-                msgData_bin[17] ? time += 64   : time += 0;
-                msgData_bin[16] ? time += 128  : time += 0;
-                msgData_bin[15] ? time += 256  : time += 0;
-                msgData_bin[14] ? time += 512  : time += 0;
-                msgData_bin[13] ? time += 1024 : time += 0;
-                msgData_bin[12] ? time += 2048 : time += 0;
-                msgData_bin[11] ? time += 4096 : time += 0;
-                msgData_bin[10] ? time += 8192 : time += 0;
+                uint16_t time = readBitsBE(msgData_bin, 10, 14);
                 if (time > 9999)
                 {
                     appendConsole("Наработка больше 9999 часов!");
@@ -747,11 +624,7 @@ void can_work::analysisMsg()
         }
         else
         {
-            uint8_t device = 0;
-            msgData_bin[4] ? device += 8 : device += 0;
-            msgData_bin[5] ? device += 4 : device += 0;
-            msgData_bin[6] ? device += 2 : device += 0;
-            msgData_bin[7] ? device += 1 : device += 0;
+            uint8_t device = static_cast<uint8_t>(readBitsBE(msgData_bin, 4, 4));
 
             switch (device)
             {

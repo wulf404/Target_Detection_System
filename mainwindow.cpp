@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "rangefinder_uart.h"
+#include <cstdint>
 #include <filesystem>
 #include <QString>
 #include "uart_receiver.h"
@@ -9,6 +10,7 @@
 #include <QFile>
 #include "remote_tracker.h"
 #include "tracking_state.h"
+#include "turret_command.h"
 
 // ===== NEW for separate video window =====
 #include <opencv2/imgproc.hpp>
@@ -151,7 +153,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(th, &QThread::started, uart, &UartReceiver::start);
 
     // при закрытии окна — корректно остановить
-    connect(this, &MainWindow::destroyed, uart, &UartReceiver::stop);
+    connect(this, &MainWindow::destroyed, uart, &UartReceiver::stop, Qt::DirectConnection);
     connect(this, &MainWindow::destroyed, th, &QThread::quit);
 
     // удалить объекты после завершения потока
@@ -227,8 +229,8 @@ void MainWindow::initCan()
     emit startCanRecv(true);
 
     if (!threadPool) threadPool = new QThreadPool(this);
+    canReaderWriter->setAutoDelete(false);
     threadPool->start(canReaderWriter);
-    canReaderWriter->setAutoDelete(true);
 
     MY_CONSOLE_A(QString(">>> CAN %1 auto-started").arg(can_name));
     g_can = canReaderWriter;
@@ -375,13 +377,9 @@ void MainWindow::sendX05Frame()
     struct can_frame cFrame;
     int temp = 0;
 
-    cFrame.can_id = 0x5;
-    cFrame.can_dlc = 5;
-
     if(ui->cbData3->isChecked()) temp += 1;
     if(ui->cbData2->isChecked()) temp += 2;
     if(ui->cbData1->isChecked()) temp += 4;
-    cFrame.data[0] = static_cast<uchar>(temp << 5);
 
     QString s1 = ui->leData1->text().trimmed(); s1.replace(',','.');
     QString s2 = ui->leData2->text().trimmed(); s2.replace(',','.');
@@ -394,10 +392,11 @@ void MainWindow::sendX05Frame()
         return;
     }
 
-    cFrame.data[4] = static_cast<uchar>(Data2 & 0xFF);
-    cFrame.data[3] = static_cast<uchar>((Data2 >> 8) & 0xFF);
-    cFrame.data[2] = static_cast<uchar>(Data1 & 0xFF);
-    cFrame.data[1] = static_cast<uchar>((Data1 >> 8) & 0xFF);
+    cFrame = turret_control::makePositionFrameCentideg(
+        static_cast<int16_t>(Data1),
+        static_cast<int16_t>(Data2),
+        static_cast<uint8_t>(temp << 5)
+    );
 
 
     emit putFrame(cFrame);
@@ -514,9 +513,6 @@ void MainWindow::on_pbSend_clicked()
 
 
     case 2: //0x5
-        cFrame.can_id = 0x5;
-        cFrame.can_dlc = 5;
-
         if (std::abs(Data1) > 180)
         {
             MY_CONSOLE_A("Неправильные координаты! Диапазон [-180 .. 180]");
@@ -542,26 +538,19 @@ void MainWindow::on_pbSend_clicked()
         std::cerr << "Азимут" << Data1 << std::endl;
         std::cerr << "Угол" << Data2 << std::endl;
 
-        cFrame.data[4] = Data2 & 0xFF;
-        cFrame.data[3] = (Data2 >> 8) & 0xFF;
-        cFrame.data[2] = Data1 & 0xFF;
-        cFrame.data[1] = (Data1 >> 8) & 0xFF;
+        check3 ? temp += 1 : temp += 0;
+        check2 ? temp += 2 : temp += 0;
+        check1 ? temp += 4 : temp += 0;
+        cFrame = turret_control::makePositionFrameCentideg(
+            static_cast<int16_t>(Data1),
+            static_cast<int16_t>(Data2),
+            static_cast<uint8_t>(temp << 5)
+        );
 
         //Test
         std::cerr << "Передача" << std::endl;
         std::cerr << "Азимут" << Data1  << "   MSB:" << int(cFrame.data[1]) << "   LSB:" << int(cFrame.data[2]) << std::endl;
         std::cerr << "Азимут" << Data2  << "   MSB:" << int(cFrame.data[3]) << "    LSB:" << int(cFrame.data[4]) << std::endl;
-
-        //cFrame.data[4] = (Data2 - ((Data2 >> 8) << 8));//Data2 % 10000;
-        //cFrame.data[3] = Data2 >> 8;
-        //cFrame.data[2] = (Data1 - ((Data1 >> 8) << 8));
-//        std::cerr << "data1  " << Data1 << " data2  " << (Data1 - ((Data1 >> 8) << 8));
-        //cFrame.data[1] = Data1 >> 8;
-
-        check3 ? temp += 1 : temp += 0;
-        check2 ? temp += 2 : temp += 0;
-        check1 ? temp += 4 : temp += 0;
-        cFrame.data[0] = temp << 5;
 
         if (ui->cbData5->isChecked()) {
             if (!timerX05->isActive()){
@@ -734,9 +723,9 @@ void MainWindow::on_pbReceive_clicked()
         ui->pbReceive->setText("Принять данные");
     }
 
-    threadPool = new QThreadPool();
+    if (!threadPool) threadPool = new QThreadPool(this);
+    canReaderWriter->setAutoDelete(false);
     threadPool->start(canReaderWriter);
-    canReaderWriter->setAutoDelete(1);
 }
 
 // ========= Показать тестовый блок ==========
@@ -903,6 +892,3 @@ void MainWindow::on_cmbID_currentIndexChanged(int index)
         break;
     }
 }
-
-
-

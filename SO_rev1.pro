@@ -23,6 +23,7 @@ SOURCES += \
     rangefinder_uart.cpp \
     remote_tracker.cpp \
     tower_state.cpp \
+    turret_command.cpp \
     tracking_state.cpp \
     uart_receiver.cpp
 
@@ -40,6 +41,7 @@ HEADERS += \
     rangefinder_uart.h \
     remote_tracker.h \
     tower_state.h \
+    turret_command.h \
     tracking_state.h \
     uart_receiver.h
 

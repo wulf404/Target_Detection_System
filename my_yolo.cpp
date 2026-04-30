@@ -2,7 +2,52 @@
 #include "auto_tracker.h"
 #include "tracking_state.h"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 static inline double ms(const cv::TickMeter& tm) { return tm.getTimeMilli(); }
+
+namespace {
+
+struct TargetCandidate
+{
+    int index = -1;
+    cv::Rect box;
+    cv::Point center;
+    int area = 0;
+    float confidence = 0.0f;
+    double score = 0.0;
+};
+
+constexpr int TARGET_MEMORY_FRAMES = 15;
+constexpr double CONF_SCORE = 1000.0;
+constexpr double AREA_SCORE = 0.7;
+constexpr double DIST_PENALTY = 0.6;
+constexpr double STICKY_RADIUS_PX = 260.0;
+constexpr double STICKY_BONUS = 180.0;
+
+double targetScore(const TargetCandidate& candidate,
+                   bool have_last_target,
+                   const cv::Point& last_target_center)
+{
+    double score = static_cast<double>(candidate.confidence) * CONF_SCORE;
+    score += std::sqrt(static_cast<double>(candidate.area)) * AREA_SCORE;
+
+    if (have_last_target) {
+        const double dx = static_cast<double>(candidate.center.x - last_target_center.x);
+        const double dy = static_cast<double>(candidate.center.y - last_target_center.y);
+        const double dist = std::hypot(dx, dy);
+        score -= std::min(dist, 1000.0) * DIST_PENALTY;
+        if (dist <= STICKY_RADIUS_PX) {
+            score += STICKY_BONUS;
+        }
+    }
+
+    return score;
+}
+
+} // namespace
 
 my_yolo::my_yolo()
 {
@@ -204,6 +249,9 @@ yolo_output my_yolo::run(cv::Mat &frame)
     // ============================
     tm_drawpack.start();
     int kept = 0;
+    std::vector<TargetCandidate> candidates;
+    candidates.reserve(keep_idx.size());
+
     for (int idx : keep_idx)
     {
         cv::Rect b = boxes[idx];
@@ -215,21 +263,62 @@ yolo_output my_yolo::run(cv::Mat &frame)
         b &= cv::Rect(0,0,frame.cols,frame.rows);
         if (b.area() <= 0) continue;
 
-        cv::rectangle(frame, b, cv::Scalar(0,0,255), 2);
+        TargetCandidate candidate;
+        candidate.index = idx;
+        candidate.box = b;
+        candidate.center = cv::Point(b.x + b.width / 2, b.y + b.height / 2);
+        candidate.area = b.area();
+        candidate.confidence = confidences[idx];
+        candidate.score = targetScore(candidate, have_last_target, last_target_center);
 
-        std::string label = cv::format("%.2f", confidences[idx]);
-        if (!classes.empty() && classIds[idx] >= 0 && classIds[idx] < (int)classes.size()) {
-            label = classes[classIds[idx]] + ":" + label;
-        }
-        cv::putText(frame, label, cv::Point(b.x, std::max(0, b.y - 5)),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0,0,255), 2);
-
-        cv::Point center(b.x + b.width/2, b.y + b.height/2);
-
-        output.points.push_back(center);
-        output.area.push_back(b.area());
-        AutoTracker::processPixelCenter(center);
+        candidates.push_back(candidate);
         kept++;
+    }
+
+    int selected = -1;
+    double best_score = -std::numeric_limits<double>::infinity();
+    for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+        if (candidates[i].score > best_score) {
+            best_score = candidates[i].score;
+            selected = i;
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
+    {
+        const TargetCandidate& candidate = candidates[i];
+        const bool is_selected = (i == selected);
+        const cv::Scalar color = is_selected ? cv::Scalar(0, 255, 0)
+                                             : cv::Scalar(0, 0, 255);
+
+        cv::rectangle(frame, candidate.box, color, is_selected ? 3 : 2);
+
+        std::string label = cv::format("%.2f", candidate.confidence);
+        if (!classes.empty() &&
+            classIds[candidate.index] >= 0 &&
+            classIds[candidate.index] < static_cast<int>(classes.size()))
+        {
+            label = classes[classIds[candidate.index]] + ":" + label;
+        }
+        cv::putText(frame, label, cv::Point(candidate.box.x, std::max(0, candidate.box.y - 5)),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
+
+        output.points.push_back(candidate.center);
+        output.area.push_back(candidate.area);
+    }
+
+    if (selected >= 0) {
+        const TargetCandidate& target = candidates[selected];
+        AutoTracker::processPixelCenter(target.center, frame.size());
+
+        last_target_center = target.center;
+        have_last_target = true;
+        lost_target_frames = 0;
+    } else {
+        if (have_last_target && ++lost_target_frames > TARGET_MEMORY_FRAMES) {
+            have_last_target = false;
+        }
+        updateMainCamSeen(false);
     }
     tm_drawpack.stop();
 

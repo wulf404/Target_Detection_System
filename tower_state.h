@@ -1,7 +1,13 @@
 #ifndef TOWER_STATE_H
 #define TOWER_STATE_H
 
-extern double g_turret_az_deg;   // текущий азимут башни
-extern double g_turret_el_deg;   // текущий угол места башни
+struct TurretState
+{
+    double az_deg = 0.0;
+    double el_deg = 0.0;
+};
 
-#endif
+TurretState getTurretState();
+void setTurretState(double az_deg, double el_deg);
+
+#endif // TOWER_STATE_H

@@ -58,6 +58,10 @@ private:
     int perf_print_every = 30;
     int perf_divisor = 1; // NEW
 
+    cv::Point last_target_center;
+    bool have_last_target = false;
+    int lost_target_frames = 0;
+
     void loadClasses(const std::string& namesPath);
 };
 
