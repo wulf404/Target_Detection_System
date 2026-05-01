@@ -7,16 +7,19 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <mutex>
 
-extern can_work* g_can;
+extern std::atomic<can_work*> g_can;
 
 namespace {
 
 constexpr uint64_t EXTERNAL_TARGET_TIMEOUT_MS = 500;
-constexpr uint64_t EXTERNAL_SEND_PERIOD_MS = 5;
+constexpr uint64_t EXTERNAL_SEND_PERIOD_MS = 20;
+constexpr int EXTERNAL_AZ_LIMIT_CENTIDEG = 17000;
+constexpr int EXTERNAL_EL_LIMIT_CENTIDEG = 8000;
 
 struct ExternalTarget
 {
@@ -64,7 +67,12 @@ void setActiveSource(TargetManager::Source next, const char* reason)
         return;
     }
 
+    const TargetManager::Source prev = g_active_source;
     g_active_source = next;
+    if (prev == TargetManager::Source::Camera && next != TargetManager::Source::Camera) {
+        AutoTracker::reset();
+    }
+
     std::cout << "[TARGET] source=" << sourceName(next)
               << " reason=" << reason
               << std::endl;
@@ -77,7 +85,8 @@ bool sendExternalIfAllowed(uint64_t now)
     if (!externalFresh(now)) {
         return false;
     }
-    if (!g_can) {
+    can_work* can = g_can.load(std::memory_order_acquire);
+    if (!can) {
         return false;
     }
     if (last_send_ms != 0 && (now - last_send_ms) < EXTERNAL_SEND_PERIOD_MS) {
@@ -88,7 +97,7 @@ bool sendExternalIfAllowed(uint64_t now)
     const double az = static_cast<double>(g_external.az_centideg) / 100.0;
     const double el = static_cast<double>(g_external.el_centideg) / 100.0;
 
-    turret_control::sendPosition(g_can, {az, el});
+    turret_control::sendPosition(can, {az, el});
 
     std::cout << "[TARGET] external angles_x100=("
               << g_external.az_centideg << ","
@@ -142,17 +151,31 @@ void TargetManager::submitExternalAnglesCentideg(int az_centideg, int el_centide
     std::lock_guard<std::mutex> lock(g_mutex);
 
     const uint64_t now = nowMs();
+    const bool in_range =
+        std::abs(az_centideg) <= EXTERNAL_AZ_LIMIT_CENTIDEG &&
+        std::abs(el_centideg) <= EXTERNAL_EL_LIMIT_CENTIDEG;
 
-    if (valid) {
+    if (valid && in_range) {
         g_external.az_centideg = az_centideg;
         g_external.el_centideg = el_centideg;
         g_external.last_seen_ms = now;
     } else {
         g_external.last_seen_ms = 0;
+        if (valid && !in_range) {
+            std::cout << "[TARGET] external target rejected: out of range az_x100="
+                      << az_centideg << " el_x100=" << el_centideg << std::endl;
+        }
     }
 
     refreshMainCamState();
     refreshSourceAfterNonCameraEvent(now, valid ? "external target" : "external invalid");
+}
+
+void TargetManager::refresh()
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    refreshMainCamState();
+    refreshSourceAfterNonCameraEvent(nowMs(), "watchdog");
 }
 
 TargetManager::Snapshot TargetManager::snapshot()

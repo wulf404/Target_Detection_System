@@ -24,6 +24,7 @@ public:
     static void submitCameraTarget(const cv::Point& center, const cv::Size& frameSize);
     static void submitCameraMiss();
     static void submitExternalAnglesCentideg(int az_centideg, int el_centideg, bool valid);
+    static void refresh();
 
     static Snapshot snapshot();
 };

@@ -4,6 +4,7 @@
 
 std::atomic<bool>     g_main_cam_has_target{false};
 std::atomic<int>      g_target_distance_mm{-1};
+std::atomic<uint64_t> g_target_distance_last_seen_ms{0};
 std::atomic<uint64_t> g_main_cam_last_seen_ms{0};
 
 static uint64_t nowMs()
@@ -47,4 +48,16 @@ void updateMainCamSeen(bool seen)
 void refreshMainCamState()
 {
     recalcMainCamState(false);
+}
+
+void updateTargetDistance(int distance_mm)
+{
+    g_target_distance_mm.store(distance_mm, std::memory_order_relaxed);
+    g_target_distance_last_seen_ms.store(nowMs(), std::memory_order_relaxed);
+}
+
+bool targetDistanceFresh()
+{
+    const uint64_t last = g_target_distance_last_seen_ms.load(std::memory_order_relaxed);
+    return last != 0 && ((nowMs() - last) <= RANGEFINDER_LOST_TIMEOUT_MS);
 }

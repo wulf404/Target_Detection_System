@@ -8,6 +8,7 @@ class AutoTracker
 public:
     static void processPixelCenter(const cv::Point& center, const cv::Size& frameSize);
     static void processPixelCenter(const cv::Point& center);
+    static void reset();
 };
 
 #endif // AUTO_TRACKER_H

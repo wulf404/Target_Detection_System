@@ -1,11 +1,19 @@
 #include "can_work.h"
 #include "tower_state.h"
 
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <thread>
 
 static uint16_t readBitsBE(const std::vector<uchar>& bits, int start, int count)
 {
+    if (start < 0 || count < 0 || start + count > static_cast<int>(bits.size())) {
+        return 0;
+    }
+
     uint16_t value = 0;
     for (int i = 0; i < count; ++i) {
         if (bits[start + i]) {
@@ -25,12 +33,16 @@ static int16_t readI16BitsBE(const std::vector<uchar>& bits, int start)
     return static_cast<int16_t>(readU16BitsBE(bits, start));
 }
 
-can_work::can_work(const char *canName) : m_canName(canName ? canName : "")
+can_work::can_work(const char *canName)
+    : mSock(-1),
+      isOpen(false),
+      isRecv(false),
+      running(false),
+      m_canName(canName ? canName : "")
 {
     stop_flag.store(0);
-    isOpen = openCan();
-    connect (this, &can_work::startParce, this, &can_work::parceMsg);
-    if (isOpen)
+    isOpen.store(openCan());
+    if (isOpen.load())
         std::cerr << "Can запущен\n";
     else
         std::cerr << "Can не запущен\n";
@@ -38,28 +50,41 @@ can_work::can_work(const char *canName) : m_canName(canName ? canName : "")
 
 can_work::~can_work()
 {
-    close(mSock);
+    setStopFlag(true);
+    closeCan();
 }
 
 //Остановка работы
 void can_work::setStopFlag(bool _stop)
 {
     stop_flag.store(_stop);
+    if (_stop) {
+        isRecv.store(false);
+    }
 }
 
 //Запуск бесконенчного приема сообщений
 void can_work::startLoop(bool startFlag)
 {
-    isRecv = startFlag;
+    isRecv.store(startFlag);
+    if (startFlag) {
+        stop_flag.store(false);
+    }
+}
+
+bool can_work::isRunning() const
+{
+    return running.load();
 }
 
 //Получение сообщения
 void can_work::run()
 {
-    while (isRecv)
-    {
-        sync();
+    running.store(true);
+    stop_flag.store(false);
 
+    while (!stop_flag.load())
+    {
         msgID = 0;
         msgDLC = 0;
         msgData.clear();
@@ -67,34 +92,78 @@ void can_work::run()
         tempData_bin.clear();
         msgData_str.clear();
 
-        appendConsole("Ожидание сообщения...\n");
-
-        int bytes = -1, timeout_ms = 1;
+        int bytes = -1, timeout_ms = 20;
         struct pollfd p[1];
+
+        if (!isOpen.load() || mSock < 0) {
+            if (!openCan()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+            }
+        }
+
+        drainTxQueue();
+
+        if (!isRecv.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+            continue;
+        }
 
         p[0].fd = mSock;
         p[0].events = POLLIN;
 
-        while(!stop_flag.load())
+        const int pollResult = poll(p, 1, timeout_ms);
+        if (pollResult < 0)
         {
-            if(poll(p, 1, timeout_ms) > 0)
-            {
-                bytes = static_cast<int>(read(mSock, &mFrame, sizeof(mFrame))); //размер структуры или размер кадра?
-                frameReady(mFrame);
-                startParce(mFrame);
-                break;
+            if (errno != EINTR) {
+                emit appendConsole(QString("[CAN] poll error: %1").arg(strerror(errno)));
+                closeCan();
             }
+            continue;
         }
-        appendConsole(bytes > 0 ? "Сообщение получено!\n" : "Ожидание сообщения прервано!\n");
+
+        if (pollResult == 0) {
+            continue;
+        }
+
+        if (p[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            emit appendConsole("[CAN] socket error/disconnect, reopening");
+            closeCan();
+            continue;
+        }
+
+        if (!(p[0].revents & POLLIN)) {
+            continue;
+        }
+
+        bytes = static_cast<int>(read(mSock, &mFrame, sizeof(mFrame)));
+        if (bytes != static_cast<int>(sizeof(mFrame))) {
+            emit appendConsole(QString("[CAN] short read: %1 bytes").arg(bytes));
+            continue;
+        }
+
+        emit frameReady(mFrame);
+        parceMsg(mFrame);
     }
+
+    {
+        std::lock_guard<std::mutex> lock(txMutex);
+        txQueue.clear();
+    }
+    running.store(false);
 }
 
 //Отправка сообщения
 void can_work::writeCan(const can_frame &frame)
 {
-    insertConsole("Отправка сообщения...\n");
-    auto bytes = write(mSock, &frame, sizeof(frame));
-    insertConsole(bytes > 0 ? "Сообщение отправлено!\n" : "Не удалось отправить сообщение!\n");
+    constexpr std::size_t kMaxQueuedFrames = 256;
+
+    std::lock_guard<std::mutex> lock(txMutex);
+    if (txQueue.size() >= kMaxQueuedFrames) {
+        txQueue.pop_front();
+        emit appendConsole("[CAN] TX queue overflow, dropped oldest frame");
+    }
+    txQueue.push_back(frame);
 }
 
 //Запуск интерфейса
@@ -102,42 +171,64 @@ bool can_work::openCan()
 {
     struct sockaddr_can addr;
     struct ifreq ifr;
-    mSock = -1;
+    closeCan();
 
     if((mSock = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0)
     {
-        std::cerr << "Ошибка открытия сокета!\n";
+        std::cerr << "Ошибка открытия сокета: " << strerror(errno) << "\n";
         mSock = -1;
+        isOpen.store(false);
+        return false;
     }
     else std::cerr << "opening socket " << mSock << "\n";
 
+    std::memset(&ifr, 0, sizeof(ifr));
     std::snprintf(ifr.ifr_name, IFNAMSIZ, "%s", m_canName.c_str());
-    ioctl(mSock, SIOCGIFINDEX, &ifr);
+    if (ioctl(mSock, SIOCGIFINDEX, &ifr) < 0) {
+        std::cerr << "Ошибка ioctl SIOCGIFINDEX: " << strerror(errno) << "\n";
+        closeCan();
+        return false;
+    }
 
+    std::memset(&addr, 0, sizeof(addr));
     addr.can_family  = AF_CAN;
     addr.can_ifindex = ifr.ifr_ifindex;
 
     if(bind(mSock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0)
     {
-        std::cerr << "Ошибка бинда сокетa!\n";
-        close(mSock);
-        mSock = -1;
+        std::cerr << "Ошибка бинда сокетa: " << strerror(errno) << "\n";
+        closeCan();
+        return false;
     }
-    return mSock > 0;
+
+    isOpen.store(true);
+    return true;
 }
 
 //Остановка интерфейса
 void can_work::closeCan()
 {
-    close(mSock);
-    isOpen = false;
+    if (mSock >= 0) {
+        close(mSock);
+        mSock = -1;
+    }
+    isOpen.store(false);
 }
 
 //Преобразование сообщения
 void can_work::parceMsg(const can_frame &frame)
 {
-    msgID = frame.can_id;
+    msgData.clear();
+    msgData_bin.clear();
+    tempData_bin.clear();
+    msgData_str.clear();
+
+    msgID = static_cast<uchar>(frame.can_id & CAN_SFF_MASK);
     msgDLC = frame.can_dlc;
+    if (msgDLC > 8) {
+        emit appendConsole(QString("[CAN] invalid DLC: %1").arg(msgDLC));
+        return;
+    }
 
     for (int i = 0; i < frame.can_dlc; i++)
     {
@@ -682,4 +773,38 @@ void can_work::analysisMsg()
         }
     }
 
+}
+
+bool can_work::writeCanNow(const can_frame &frame)
+{
+    if (!isOpen.load() || mSock < 0) {
+        emit appendConsole("[CAN] TX failed: socket is not open");
+        return false;
+    }
+
+    const ssize_t bytes = write(mSock, &frame, sizeof(frame));
+    if (bytes != static_cast<ssize_t>(sizeof(frame))) {
+        const QString reason = (bytes < 0)
+            ? QString::fromLocal8Bit(strerror(errno))
+            : QString("short write: %1 bytes").arg(bytes);
+        emit appendConsole("[CAN] TX failed: " + reason);
+        return false;
+    }
+
+    return true;
+}
+
+void can_work::drainTxQueue()
+{
+    std::deque<can_frame> local;
+    {
+        std::lock_guard<std::mutex> lock(txMutex);
+        local.swap(txQueue);
+    }
+
+    for (const can_frame& frame : local) {
+        if (!writeCanNow(frame)) {
+            break;
+        }
+    }
 }

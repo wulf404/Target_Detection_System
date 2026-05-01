@@ -21,7 +21,8 @@ Balancer::Balancer(QObject *parent) : QObject(parent)
 Balancer::~Balancer()
 {
     if (tp) {
-        tp->waitForDone(1000);
+        emit stopTasks();
+        tp->waitForDone(2000);
         tp->clear();
         delete tp;
     }
@@ -29,6 +30,9 @@ Balancer::~Balancer()
 
 void Balancer::startAll()
 {
+    if (!camera || camera->isStartBefore()) {
+        return;
+    }
     tp->start(camera);
 }
 
@@ -44,7 +48,7 @@ void Balancer::closeAll()
     cv::destroyAllWindows();
 
     emit stopTasks();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    tp->waitForDone(2000);
     emit closeTasks();
 }
 

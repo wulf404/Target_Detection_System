@@ -21,6 +21,9 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
+class QThread;
+class UartReceiver;
+
 namespace fs = std::experimental::filesystem;
 
 #define MY_CONSOLE_A ui->textBrowser->appendPlainText
@@ -37,6 +40,7 @@ protected:
         if (videoWindow) {
             videoWindow->close();
         }
+        shutdownServices();
         closeWindow();
         ev->accept();
     }
@@ -73,6 +77,7 @@ private slots:
     void sendX10Frame();
     void sendX05Frame();
     void sendX0FFrame();
+    void refreshTrackingHealth();
 
     void on_textBrowser_textChanged();
     void on_cmbID_currentIndexChanged(int index);
@@ -86,13 +91,17 @@ private:
     QTimer *timerX10 = nullptr;
     QTimer *timerX05 = nullptr;
     QTimer *timerX0F = nullptr;
+    QTimer *healthTimer = nullptr;
 
     void initCan();
+    void shutdownServices();
 
     RangefinderUart* rf = nullptr;
 
     can_work *canReaderWriter = nullptr;
     QThreadPool *threadPool = nullptr;
+    QThread *uartThread = nullptr;
+    UartReceiver *uartReceiver = nullptr;
 
     std::vector<QString> can_devices;
     bool isRecieve = false;

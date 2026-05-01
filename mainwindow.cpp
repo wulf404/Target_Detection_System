@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 #include "rangefinder_uart.h"
 #include <cstdint>
+#include <atomic>
 #include <filesystem>
 #include <QString>
 #include "uart_receiver.h"
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <QFile>
 #include "remote_tracker.h"
+#include "target_manager.h"
 #include "tracking_state.h"
 #include "turret_command.h"
 
@@ -18,7 +20,7 @@
 #include <QMutexLocker>
 
 #define autostart
-can_work* g_can = nullptr;
+std::atomic<can_work*> g_can{nullptr};
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -126,36 +128,41 @@ MainWindow::MainWindow(QWidget *parent)
     canWaiter->start(200);
 
     // === UART PIXELS ===
-    UartReceiver* uart = new UartReceiver();   // без parent, т.к. уйдёт в другой поток
-    QThread* th = new QThread(this);           // parent = this, чтобы поток не утёк
+    uartReceiver = new UartReceiver();         // без parent, т.к. уйдёт в другой поток
+    uartThread = new QThread(this);            // parent = this, чтобы поток не утёк
 
-    uart->moveToThread(th);
+    uartReceiver->moveToThread(uartThread);
+    connect(uartReceiver, &QObject::destroyed, this, [this]() { uartReceiver = nullptr; });
+    connect(uartThread, &QObject::destroyed, this, [this]() { uartThread = nullptr; });
 
     // старт чтения в потоке
-    connect(th, &QThread::started, uart, &UartReceiver::start);
+    connect(uartThread, &QThread::started, uartReceiver, &UartReceiver::start);
 
     // при закрытии окна — корректно остановить
-    connect(this, &MainWindow::destroyed, uart, &UartReceiver::stop, Qt::DirectConnection);
-    connect(this, &MainWindow::destroyed, th, &QThread::quit);
+    connect(this, &MainWindow::destroyed, uartReceiver, &UartReceiver::stop, Qt::DirectConnection);
+    connect(this, &MainWindow::destroyed, uartThread, &QThread::quit);
 
     // удалить объекты после завершения потока
-    connect(th, &QThread::finished, uart, &QObject::deleteLater);
-    connect(th, &QThread::finished, th,   &QObject::deleteLater);
+    connect(uartThread, &QThread::finished, uartReceiver, &QObject::deleteLater);
 
     // ошибки в консоль
-    connect(uart, &UartReceiver::error, this, [this](const QString& msg){
+    connect(uartReceiver, &UartReceiver::error, this, [this](const QString& msg){
         MY_CONSOLE_A("[UART ERROR] " + msg);
     });
-    connect(uart, &UartReceiver::status, this, [this](const QString& msg){
+    connect(uartReceiver, &UartReceiver::status, this, [this](const QString& msg){
         MY_CONSOLE_A(msg);
     });
 
-    th->start();
+    uartThread->start();
 
     RemoteTracker* remote = new RemoteTracker(this);
-    connect(uart, &UartReceiver::pixelsReceived,
+    connect(uartReceiver, &UartReceiver::pixelsReceived,
             remote, &RemoteTracker::onPixels,
             Qt::QueuedConnection);
+
+    healthTimer = new QTimer(this);
+    connect(healthTimer, &QTimer::timeout, this, &MainWindow::refreshTrackingHealth);
+    healthTimer->start(100);
 
 #ifdef autostart
     ui->start->pressed();
@@ -215,17 +222,64 @@ void MainWindow::initCan()
 
     if (!threadPool) threadPool = new QThreadPool(this);
     canReaderWriter->setAutoDelete(false);
-    threadPool->start(canReaderWriter);
+    if (!canReaderWriter->isRunning()) {
+        threadPool->start(canReaderWriter);
+    }
 
     MY_CONSOLE_A(QString(">>> CAN %1 auto-started").arg(can_name));
-    g_can = canReaderWriter;
+    g_can.store(canReaderWriter, std::memory_order_release);
 
+}
+
+void MainWindow::refreshTrackingHealth()
+{
+    TargetManager::refresh();
+}
+
+void MainWindow::shutdownServices()
+{
+    if (healthTimer) {
+        healthTimer->stop();
+    }
+    if (timerX10) timerX10->stop();
+    if (timerX05) timerX05->stop();
+    if (timerX0F) timerX0F->stop();
+
+    if (rf) {
+        rf->stopMeasurement();
+        rf->stop();
+    }
+
+    if (canReaderWriter) {
+        emit startCanRecv(false);
+        canReaderWriter->setStopFlag(true);
+    }
+    if (threadPool) {
+        threadPool->waitForDone(1000);
+    }
+    if (canReaderWriter) {
+        canReaderWriter->closeCan();
+        g_can.store(nullptr, std::memory_order_release);
+        if (!canReaderWriter->isRunning()) {
+            delete canReaderWriter;
+            canReaderWriter = nullptr;
+        }
+    }
+
+    if (uartReceiver) {
+        uartReceiver->stop();
+    }
+    if (uartThread && uartThread->isRunning()) {
+        uartThread->quit();
+        uartThread->wait(1000);
+    }
 }
 
 
 
 MainWindow::~MainWindow()
 {
+    shutdownServices();
     delete ui;
 }
 
@@ -302,6 +356,7 @@ void MainWindow::on_pbTestReceive_clicked()
 
 void MainWindow::showDistance(int mm)
 {
+    updateTargetDistance(mm);
     int dm = mm / 100;
 
     QString msg = QString("Distance = %1 mm").arg(mm);
@@ -340,7 +395,7 @@ void MainWindow::showStatus(const QString& msg)
 //цикл отправка X10
 void MainWindow::sendX10Frame()
 {
-    struct can_frame cFrame;
+    struct can_frame cFrame{};
     int temp = 0;
 
     cFrame.can_id = 0x10;
@@ -679,9 +734,8 @@ void MainWindow::on_pbSend_clicked()
         cFrame.data[0] = Data1;
         break;
     default:
-//        MY_CONSOLE_A("Невозможно отправить сообщение!\n");
-        MY_CONSOLE_A("Отправка мусорного сообщения ... \n");
-//        isSend = false;
+        MY_CONSOLE_A("Невозможно отправить сообщение: не выбран тип кадра\n");
+        isSend = false;
         break;
     }
 
@@ -697,8 +751,13 @@ void MainWindow::on_pbSend_clicked()
 //Кнопка "Получить"
 void MainWindow::on_pbReceive_clicked()
 {
+    if (!canReaderWriter) {
+        MY_CONSOLE_A("[CAN] Receiver is not initialized");
+        return;
+    }
+
     isRecieve = !isRecieve;
-    startCanRecv(isRecieve);
+    emit startCanRecv(isRecieve);
     if (isRecieve)
     {
         ui->pbReceive->setText("Остановить прием");
@@ -708,9 +767,11 @@ void MainWindow::on_pbReceive_clicked()
         ui->pbReceive->setText("Принять данные");
     }
 
-    if (!threadPool) threadPool = new QThreadPool(this);
-    canReaderWriter->setAutoDelete(false);
-    threadPool->start(canReaderWriter);
+    if (isRecieve && !canReaderWriter->isRunning()) {
+        if (!threadPool) threadPool = new QThreadPool(this);
+        canReaderWriter->setAutoDelete(false);
+        threadPool->start(canReaderWriter);
+    }
 }
 
 // ========= Показать тестовый блок ==========

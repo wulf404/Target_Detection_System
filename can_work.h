@@ -5,7 +5,9 @@
 #include <QRunnable>
 #include <QThreadPool>
 #include <atomic>
+#include <deque>
 #include <iostream>
+#include <mutex>
 
 #include <string.h>
 #include <stdio.h>
@@ -43,6 +45,7 @@ public:
 
     bool openCan();
     void closeCan();
+    bool isRunning() const;
 
 
     void parceMsg(const can_frame &frame);
@@ -61,12 +64,15 @@ signals:
 
 private:
     int mSock;
-    bool isOpen;
-    bool isRecv;
+    std::atomic<bool> isOpen;
+    std::atomic<bool> isRecv;
+    std::atomic<bool> running;
     std::string m_canName;
     struct can_frame mFrame;
 
     std::atomic<bool> stop_flag;
+    std::mutex txMutex;
+    std::deque<can_frame> txQueue;
 
     uchar msgID;
     uchar msgDLC;
@@ -76,6 +82,8 @@ private:
     std::vector<QString> msgData_str;
 
     virtual void run() override;
+    bool writeCanNow(const can_frame &frame);
+    void drainTxQueue();
 };
 
 
