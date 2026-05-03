@@ -187,6 +187,7 @@ TargetManager::Snapshot TargetManager::snapshot()
     Snapshot snap;
     snap.cameraFresh = cameraFresh(now);
     snap.externalFresh = externalFresh(now);
+    snap.externalLastSeenMs = g_external.last_seen_ms;
     if (snap.cameraFresh) {
         snap.activeSource = Source::Camera;
     } else if (snap.externalFresh) {

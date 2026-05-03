@@ -19,6 +19,8 @@ public:
 signals:
     void distanceReady(int mm); // готовое расстояние
     void errorText(const QString& text);
+    void deviceStateChanged(bool connected, const QString& description);
+    void usbDevicesChanged(const QString& summary);
 
 private slots:
     void onReadyRead();

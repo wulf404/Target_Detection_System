@@ -19,6 +19,8 @@ public slots:
 signals:
     void error(QString msg);
     void status(QString msg);
+    void deviceStateChanged(bool connected, QString description);
+    void usbDevicesChanged(QString summary);
     void pixelsReceived(int x, int y, bool valid);
 
 private:

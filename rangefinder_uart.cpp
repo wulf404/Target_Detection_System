@@ -45,6 +45,7 @@ void RangefinderUart::reportUsbPorts(const QString& summary)
     }
 
     lastUsbSummary = summary;
+    emit usbDevicesChanged(summary);
     emit errorText("[USB] ttyUSB devices: " + summary);
 }
 
@@ -62,6 +63,7 @@ bool RangefinderUart::start()
 
     const auto port = serial_ports::findPort(serial_ports::Role::Rangefinder, ports);
     if (!port) {
+        emit deviceStateChanged(false, "FT232BM not found");
         emit errorText("[RF] Waiting for FT232BM rangefinder USB serial port");
         scheduleRetry(1000);
         return false;
@@ -82,6 +84,7 @@ bool RangefinderUart::start()
 
     QThread::msleep(200);                 // дать чипу инициализироваться
     if (!sp->open(QIODevice::ReadWrite)) {
+        emit deviceStateChanged(false, selectedPort);
         emit errorText("[RF] Can't open " + sp->portName() + ": " + sp->errorString());
         scheduleRetry(1000);
         return false;
@@ -91,6 +94,7 @@ bool RangefinderUart::start()
     QThread::msleep(100);
 
     retryScheduled = false;
+    emit deviceStateChanged(true, selectedPort);
     emit errorText("[RF] Opened rangefinder: " + selectedPort);
     std::cout << "[RF] Port opened: "
               << serial_ports::describe(*port).toStdString()
@@ -101,6 +105,7 @@ bool RangefinderUart::start()
 
 void RangefinderUart::stop() {
     if (sp && sp->isOpen()) {
+        emit deviceStateChanged(false, sp->portName());
         emit errorText("[RF] Port closed: " + sp->portName());
         sp->close();
         std::cout << "[RF] Port closed" << std::endl;
@@ -204,6 +209,7 @@ void RangefinderUart::onReadyRead()
                 //qWarning() << "[RF] Too many CRC errors, restarting port...";
                 crc_fail_count = 0;
                 emit errorText("[RF] Too many CRC errors on " + sp->portName() + ", reopening");
+                emit deviceStateChanged(false, sp->portName());
                 sp->close();
                 scheduleRetry(500);
             }
@@ -236,6 +242,7 @@ void RangefinderUart::onError(QSerialPort::SerialPortError err) {
 
     const QString portName = sp ? sp->portName() : QString("?");
     const QString errorString = sp ? sp->errorString() : QString("unknown serial error");
+    emit deviceStateChanged(false, portName);
     emit errorText("[RF] Serial error on " + portName + ": " + errorString + ". Rescanning USB");
 
     std::cerr << "[RF ERROR] " << errorString.toStdString() << std::endl;

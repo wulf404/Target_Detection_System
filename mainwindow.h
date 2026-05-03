@@ -13,6 +13,8 @@
 #include <QMutex>
 #include <opencv2/core.hpp>
 
+#include <cstdint>
+
 #include <balancer.h>
 #include <rangefinder_uart.h>
 #include "ui_mainwindow.h"
@@ -23,6 +25,7 @@ QT_END_NAMESPACE
 
 class QThread;
 class UartReceiver;
+class QGroupBox;
 
 namespace fs = std::experimental::filesystem;
 
@@ -95,6 +98,8 @@ private:
 
     void initCan();
     void shutdownServices();
+    void setupSystemStatusPanel();
+    void updateSystemStatusPanel();
 
     RangefinderUart* rf = nullptr;
 
@@ -112,6 +117,25 @@ private:
     QWidget* videoWindow = nullptr;
     QLabel*  view = nullptr;
     QMutex   draw_mutex;
+
+    QGroupBox* systemStatusGroup = nullptr;
+    QLabel* statusOverall = nullptr;
+    QLabel* statusCan = nullptr;
+    QLabel* statusCamera = nullptr;
+    QLabel* statusTargetSource = nullptr;
+    QLabel* statusYoloTarget = nullptr;
+    QLabel* statusExternal = nullptr;
+    QLabel* statusRangefinder = nullptr;
+    QLabel* statusDistance = nullptr;
+    QLabel* statusTurret = nullptr;
+    QLabel* statusUsb = nullptr;
+
+    bool externalDeviceConnected = false;
+    bool rangefinderConnected = false;
+    QString externalDeviceDescription = "not found";
+    QString rangefinderDescription = "not found";
+    QString usbDevicesSummary = "not scanned";
+    uint64_t lastVideoFrameMs = 0;
 
     static QImage matToQImageRGB(const cv::Mat &bgr);
 };

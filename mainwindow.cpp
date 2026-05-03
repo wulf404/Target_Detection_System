@@ -12,15 +12,122 @@
 #include "remote_tracker.h"
 #include "target_manager.h"
 #include "tracking_state.h"
+#include "tower_state.h"
 #include "turret_command.h"
 
 // ===== NEW for separate video window =====
 #include <opencv2/imgproc.hpp>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QSizePolicy>
 #include <QVBoxLayout>
 #include <QMutexLocker>
 
+#include <chrono>
+
 #define autostart
 std::atomic<can_work*> g_can{nullptr};
+
+namespace {
+
+enum class StatusLevel
+{
+    Ok,
+    Warn,
+    Bad,
+    Neutral
+};
+
+uint64_t monotonicMs()
+{
+    using namespace std::chrono;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+QString statusStyle(StatusLevel level)
+{
+    QString bg = "#46515f";
+    QString fg = "#ffffff";
+    switch (level) {
+    case StatusLevel::Ok:
+        bg = "#1f7a3a";
+        break;
+    case StatusLevel::Warn:
+        bg = "#8a6d1a";
+        break;
+    case StatusLevel::Bad:
+        bg = "#8a2d2d";
+        break;
+    case StatusLevel::Neutral:
+    default:
+        break;
+    }
+
+    return QString("QLabel { background:%1; color:%2; padding:3px 6px; "
+                   "border-radius:3px; font-weight:600; }")
+        .arg(bg)
+        .arg(fg);
+}
+
+void setStatus(QLabel* label, const QString& text, StatusLevel level)
+{
+    if (!label) {
+        return;
+    }
+
+    label->setText(text);
+    label->setStyleSheet(statusStyle(level));
+}
+
+QLabel* addStatusRow(QGridLayout* layout, int row, const QString& name)
+{
+    auto* title = new QLabel(name);
+    title->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    title->setMinimumWidth(92);
+
+    auto* value = new QLabel("WAIT");
+    value->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    value->setWordWrap(true);
+    value->setMinimumWidth(210);
+    value->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    layout->addWidget(title, row, 0);
+    layout->addWidget(value, row, 1);
+    return value;
+}
+
+QString ageText(uint64_t now, uint64_t last)
+{
+    if (last == 0) {
+        return "never";
+    }
+    return QString("%1 ms ago").arg(now - last);
+}
+
+QString targetSourceText(TargetManager::Source source)
+{
+    switch (source) {
+    case TargetManager::Source::Camera:
+        return "CAMERA";
+    case TargetManager::Source::External:
+        return "EXTERNAL";
+    case TargetManager::Source::None:
+    default:
+        return "NONE";
+    }
+}
+
+QString shortDeviceText(const QString& text)
+{
+    if (text.size() <= 72) {
+        return text;
+    }
+    return text.left(69) + "...";
+}
+
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -69,6 +176,7 @@ MainWindow::MainWindow(QWidget *parent)
     // === Настройка UI ===
     ui->gbTest->hide();
     ui->textBrowser->clear();
+    setupSystemStatusPanel();
 
     ui->lData1->setText("Data1");
     ui->lData1->setEnabled(false);
@@ -113,6 +221,17 @@ MainWindow::MainWindow(QWidget *parent)
     rf = new RangefinderUart("auto", this);
     connect(rf, &RangefinderUart::distanceReady, this, &MainWindow::showDistance);
     connect(rf, &RangefinderUart::errorText,     this, &MainWindow::showStatus);
+    connect(rf, &RangefinderUart::deviceStateChanged, this,
+            [this](bool connected, const QString& description) {
+                rangefinderConnected = connected;
+                rangefinderDescription = description;
+                updateSystemStatusPanel();
+            });
+    connect(rf, &RangefinderUart::usbDevicesChanged, this,
+            [this](const QString& summary) {
+                usbDevicesSummary = summary;
+                updateSystemStatusPanel();
+            });
     rf->start();
 
     // УМНЫЙ СТАРТ CAN
@@ -152,6 +271,17 @@ MainWindow::MainWindow(QWidget *parent)
     connect(uartReceiver, &UartReceiver::status, this, [this](const QString& msg){
         MY_CONSOLE_A(msg);
     });
+    connect(uartReceiver, &UartReceiver::deviceStateChanged, this,
+            [this](bool connected, const QString& description) {
+                externalDeviceConnected = connected;
+                externalDeviceDescription = description;
+                updateSystemStatusPanel();
+            });
+    connect(uartReceiver, &UartReceiver::usbDevicesChanged, this,
+            [this](const QString& summary) {
+                usbDevicesSummary = summary;
+                updateSystemStatusPanel();
+            });
 
     uartThread->start();
 
@@ -181,11 +311,173 @@ QImage MainWindow::matToQImageRGB(const cv::Mat &bgr)
 
 void MainWindow::onNewFrame(const cv::Mat &frame)
 {
+    lastVideoFrameMs = monotonicMs();
     if (!view) return;
     QMutexLocker locker(&draw_mutex);
     QImage img = matToQImageRGB(frame);
     if (img.isNull()) return;
     view->setPixmap(QPixmap::fromImage(img));
+}
+
+void MainWindow::setupSystemStatusPanel()
+{
+    if (systemStatusGroup) {
+        return;
+    }
+
+    systemStatusGroup = new QGroupBox("Состояние системы", this);
+    systemStatusGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    auto* layout = new QGridLayout(systemStatusGroup);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setHorizontalSpacing(8);
+    layout->setVerticalSpacing(5);
+
+    int row = 0;
+    statusOverall = addStatusRow(layout, row++, "Общее");
+    statusCan = addStatusRow(layout, row++, "CAN");
+    statusCamera = addStatusRow(layout, row++, "Камера");
+    statusTargetSource = addStatusRow(layout, row++, "Источник");
+    statusYoloTarget = addStatusRow(layout, row++, "YOLO");
+    statusExternal = addStatusRow(layout, row++, "Внешн.");
+    statusRangefinder = addStatusRow(layout, row++, "Дальномер");
+    statusDistance = addStatusRow(layout, row++, "Дистанция");
+    statusTurret = addStatusRow(layout, row++, "Башня");
+    statusUsb = addStatusRow(layout, row++, "USB");
+
+    if (ui && ui->gridLayout) {
+        ui->gridLayout->addWidget(systemStatusGroup, 3, 0, 1, 2);
+    }
+
+    updateSystemStatusPanel();
+}
+
+void MainWindow::updateSystemStatusPanel()
+{
+    if (!systemStatusGroup) {
+        return;
+    }
+
+    constexpr uint64_t CAMERA_FRAME_TIMEOUT_MS = 800;
+
+    const uint64_t now = monotonicMs();
+    const auto target = TargetManager::snapshot();
+    const TurretState turret = getTurretState();
+    const bool canOk = g_can.load(std::memory_order_acquire) != nullptr;
+    const bool cameraFramesFresh =
+        lastVideoFrameMs != 0 && (now - lastVideoFrameMs) <= CAMERA_FRAME_TIMEOUT_MS;
+    const bool distanceFresh = targetDistanceFresh();
+
+    StatusLevel overallLevel = StatusLevel::Bad;
+    QString overallText = "DEGRADED";
+    if (canOk && cameraFramesFresh && turret.fresh &&
+        rangefinderConnected && distanceFresh &&
+        (target.activeSource != TargetManager::Source::None))
+    {
+        overallLevel = StatusLevel::Ok;
+        overallText = "OK";
+    } else if (canOk && cameraFramesFresh && turret.fresh) {
+        overallLevel = StatusLevel::Warn;
+        overallText = target.activeSource == TargetManager::Source::None
+            ? "NO TARGET"
+            : "PARTIAL";
+    }
+    setStatus(statusOverall, overallText, overallLevel);
+
+    const QString canName = ui->cbCan->currentText().isEmpty()
+        ? QString("can?")
+        : ui->cbCan->currentText();
+    const QString canText = canOk
+        ? QString("OK %1 %2").arg(canName).arg(canReaderWriter && canReaderWriter->isRunning() ? "running" : "idle")
+        : QString("WAIT %1").arg(canName);
+    setStatus(statusCan, canText, canOk ? StatusLevel::Ok : StatusLevel::Bad);
+
+    if (cameraFramesFresh) {
+        setStatus(statusCamera,
+                  "OK frame " + ageText(now, lastVideoFrameMs),
+                  StatusLevel::Ok);
+    } else if (lastVideoFrameMs == 0) {
+        setStatus(statusCamera, "WAIT no frames", StatusLevel::Bad);
+    } else {
+        setStatus(statusCamera,
+                  "STALE frame " + ageText(now, lastVideoFrameMs),
+                  StatusLevel::Bad);
+    }
+
+    const StatusLevel sourceLevel = target.activeSource == TargetManager::Source::None
+        ? StatusLevel::Warn
+        : StatusLevel::Ok;
+    setStatus(statusTargetSource, targetSourceText(target.activeSource), sourceLevel);
+
+    if (target.cameraFresh) {
+        setStatus(statusYoloTarget,
+                  "OK target " + ageText(now, g_main_cam_last_seen_ms.load(std::memory_order_relaxed)),
+                  StatusLevel::Ok);
+    } else {
+        setStatus(statusYoloTarget,
+                  "LOST " + ageText(now, g_main_cam_last_seen_ms.load(std::memory_order_relaxed)),
+                  StatusLevel::Warn);
+    }
+
+    if (externalDeviceConnected && target.externalFresh) {
+        setStatus(statusExternal,
+                  QString("OK AZ=%1 EL=%2 %3")
+                      .arg(target.externalAzCentideg / 100.0, 0, 'f', 2)
+                      .arg(target.externalElCentideg / 100.0, 0, 'f', 2)
+                      .arg(shortDeviceText(externalDeviceDescription)),
+                  StatusLevel::Ok);
+    } else if (externalDeviceConnected) {
+        setStatus(statusExternal,
+                  "STALE data " + ageText(now, target.externalLastSeenMs) + " " +
+                      shortDeviceText(externalDeviceDescription),
+                  StatusLevel::Warn);
+    } else {
+        setStatus(statusExternal,
+                  "WAIT " + shortDeviceText(externalDeviceDescription),
+                  StatusLevel::Bad);
+    }
+
+    if (rangefinderConnected && distanceFresh) {
+        setStatus(statusRangefinder,
+                  "OK " + shortDeviceText(rangefinderDescription),
+                  StatusLevel::Ok);
+    } else if (rangefinderConnected) {
+        setStatus(statusRangefinder,
+                  "STALE " + shortDeviceText(rangefinderDescription),
+                  StatusLevel::Warn);
+    } else {
+        setStatus(statusRangefinder,
+                  "WAIT " + shortDeviceText(rangefinderDescription),
+                  StatusLevel::Bad);
+    }
+
+    const int distance = g_target_distance_mm.load(std::memory_order_relaxed);
+    if (distanceFresh && distance >= 0) {
+        setStatus(statusDistance,
+                  QString("OK %1 mm %2")
+                      .arg(distance)
+                      .arg(ageText(now, g_target_distance_last_seen_ms.load(std::memory_order_relaxed))),
+                  StatusLevel::Ok);
+    } else {
+        setStatus(statusDistance,
+                  "WAIT " + ageText(now, g_target_distance_last_seen_ms.load(std::memory_order_relaxed)),
+                  StatusLevel::Warn);
+    }
+
+    if (turret.fresh) {
+        setStatus(statusTurret,
+                  QString("OK AZ=%1 EL=%2 %3")
+                      .arg(turret.az_deg, 0, 'f', 2)
+                      .arg(turret.el_deg, 0, 'f', 2)
+                      .arg(ageText(now, turret.last_update_ms)),
+                  StatusLevel::Ok);
+    } else {
+        setStatus(statusTurret,
+                  "WAIT " + ageText(now, turret.last_update_ms),
+                  StatusLevel::Warn);
+    }
+
+    setStatus(statusUsb, usbDevicesSummary, StatusLevel::Neutral);
 }
 
 
@@ -234,6 +526,7 @@ void MainWindow::initCan()
 void MainWindow::refreshTrackingHealth()
 {
     TargetManager::refresh();
+    updateSystemStatusPanel();
 }
 
 void MainWindow::shutdownServices()

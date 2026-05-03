@@ -152,12 +152,14 @@ void UartReceiver::start()
         const QString usb_summary = serial_ports::describeList(ports);
         if (usb_summary != last_usb_summary) {
             last_usb_summary = usb_summary;
+            emit usbDevicesChanged(usb_summary);
             emit status("[USB] ttyUSB devices: " + usb_summary);
         }
 
         const auto port = serial_ports::findPort(serial_ports::Role::CoordinateSource, ports);
         if (!port) {
             if (!reported_wait) {
+                emit deviceStateChanged(false, "cp210x not found");
                 emit status(QString("[UART] Waiting for cp210x coordinate source USB serial port"));
                 reported_wait = true;
             }
@@ -176,6 +178,7 @@ void UartReceiver::start()
         const QByteArray devicePathBytes = port->devicePath.toLocal8Bit();
         const int fd = open(devicePathBytes.constData(), O_RDONLY | O_NOCTTY | O_NONBLOCK);
         if (fd < 0) {
+            emit deviceStateChanged(false, selectedPort);
             const QString open_error = QString("Waiting for %1: %2")
                                            .arg(port->devicePath)
                                            .arg(strerror(errno));
@@ -198,6 +201,7 @@ void UartReceiver::start()
         std::cout << "[UART] "
                   << serial_ports::describe(*port).toStdString()
                   << " opened" << std::endl;
+        emit deviceStateChanged(true, selectedPort);
         emit status("[UART] Opened coordinate source: " + selectedPort);
         const bool should_reconnect = readFromOpenPort(fd, port->devicePath);
         close(fd);
@@ -207,6 +211,7 @@ void UartReceiver::start()
         }
 
         if (should_reconnect) {
+            emit deviceStateChanged(false, selectedPort);
             emit status("[UART] Coordinate source disconnected, rescanning USB");
             emit pixelsReceived(0, 0, false);
             waitBeforeReconnect(RECONNECT_DELAY_MS);

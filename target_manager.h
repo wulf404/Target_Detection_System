@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <opencv2/core.hpp>
 
 class TargetManager
@@ -19,6 +21,7 @@ public:
         bool externalFresh = false;
         int externalAzCentideg = 0;
         int externalElCentideg = 0;
+        uint64_t externalLastSeenMs = 0;
     };
 
     static void submitCameraTarget(const cv::Point& center, const cv::Size& frameSize);
