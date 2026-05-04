@@ -1,6 +1,8 @@
 QT       += core gui serialport
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
+TARGET = Target_Detection_System
+
 CONFIG += c++17
 DEFINES += QT_DEPRECATED_WARNINGS
 
@@ -32,6 +34,7 @@ SOURCES += \
 
 HEADERS += \
     auto_tracker.h \
+    app_config.h \
     balancer.h \
     camera.h \
     can_commands.h \

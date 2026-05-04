@@ -128,13 +128,11 @@ private:
     QLabel* statusRangefinder = nullptr;
     QLabel* statusDistance = nullptr;
     QLabel* statusTurret = nullptr;
-    QLabel* statusUsb = nullptr;
 
     bool externalDeviceConnected = false;
     bool rangefinderConnected = false;
     QString externalDeviceDescription = "not found";
     QString rangefinderDescription = "not found";
-    QString usbDevicesSummary = "not scanned";
     uint64_t lastVideoFrameMs = 0;
 
     static QImage matToQImageRGB(const cv::Mat &bgr);

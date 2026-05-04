@@ -6,9 +6,17 @@
 class AutoTracker
 {
 public:
+    struct OverlayConfig
+    {
+        int deadzoneX = 0;
+        int deadzoneY = 0;
+        bool deadzoneEnabled = false;
+    };
+
     static void processPixelCenter(const cv::Point& center, const cv::Size& frameSize);
     static void processPixelCenter(const cv::Point& center);
     static void reset();
+    static OverlayConfig overlayConfig();
 };
 
 #endif // AUTO_TRACKER_H

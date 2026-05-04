@@ -1,4 +1,5 @@
 #include "balancer.h"
+#include "app_config.h"
 #include <opencv2/highgui.hpp>
 #include <thread>
 #include <chrono>
@@ -9,7 +10,7 @@ Balancer::Balancer(QObject *parent) : QObject(parent)
     tp = new QThreadPool();
     tp->setMaxThreadCount(2);
 
-    camera = new Camera(this, 1920);   //  FullHD/4K
+    camera = new Camera(this, app_config::kCameraRequestedWidth);
     camera->setAutoDelete(false);
 
     connect(this, &Balancer::stopTasks,  camera, &Camera::Stop);

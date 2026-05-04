@@ -5,6 +5,9 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/videoio.hpp>
 
+#include <string>
+#include <vector>
+
 class QTimer;
 
 class Camera : public TaskRunner
@@ -29,7 +32,8 @@ private:
 
     bool openDevice();
     void closeDevice();
-    std::string buildUsbPipeline() const;
+    std::vector<std::string> cameraDeviceCandidates() const;
+    std::string buildUsbPipeline(const std::string& devicePath) const;
 
 private:
     QTimer *reconnectTimer = nullptr;
@@ -43,6 +47,7 @@ private:
 
     my_yolo *Yolo = nullptr;
     cv::VideoCapture video;
+    std::string current_device_path;
 
 public slots:
     void checkAndReconnect();

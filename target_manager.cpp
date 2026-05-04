@@ -26,6 +26,8 @@ struct ExternalTarget
     int az_centideg = 0;
     int el_centideg = 0;
     uint64_t last_seen_ms = 0;
+    uint64_t last_packet_ms = 0;
+    bool no_target = false;
 };
 
 std::mutex g_mutex;
@@ -59,6 +61,12 @@ bool externalFresh(uint64_t now)
 {
     return g_external.last_seen_ms != 0 &&
            (now - g_external.last_seen_ms) <= EXTERNAL_TARGET_TIMEOUT_MS;
+}
+
+bool externalLinkFresh(uint64_t now)
+{
+    return g_external.last_packet_ms != 0 &&
+           (now - g_external.last_packet_ms) <= EXTERNAL_TARGET_TIMEOUT_MS;
 }
 
 void setActiveSource(TargetManager::Source next, const char* reason)
@@ -151,6 +159,7 @@ void TargetManager::submitExternalAnglesCentideg(int az_centideg, int el_centide
     std::lock_guard<std::mutex> lock(g_mutex);
 
     const uint64_t now = nowMs();
+    g_external.last_packet_ms = now;
     const bool in_range =
         std::abs(az_centideg) <= EXTERNAL_AZ_LIMIT_CENTIDEG &&
         std::abs(el_centideg) <= EXTERNAL_EL_LIMIT_CENTIDEG;
@@ -159,8 +168,10 @@ void TargetManager::submitExternalAnglesCentideg(int az_centideg, int el_centide
         g_external.az_centideg = az_centideg;
         g_external.el_centideg = el_centideg;
         g_external.last_seen_ms = now;
+        g_external.no_target = false;
     } else {
         g_external.last_seen_ms = 0;
+        g_external.no_target = !valid;
         if (valid && !in_range) {
             std::cout << "[TARGET] external target rejected: out of range az_x100="
                       << az_centideg << " el_x100=" << el_centideg << std::endl;
@@ -187,7 +198,10 @@ TargetManager::Snapshot TargetManager::snapshot()
     Snapshot snap;
     snap.cameraFresh = cameraFresh(now);
     snap.externalFresh = externalFresh(now);
+    snap.externalLinkFresh = externalLinkFresh(now);
+    snap.externalNoTarget = g_external.no_target && snap.externalLinkFresh && !snap.externalFresh;
     snap.externalLastSeenMs = g_external.last_seen_ms;
+    snap.externalLastPacketMs = g_external.last_packet_ms;
     if (snap.cameraFresh) {
         snap.activeSource = Source::Camera;
     } else if (snap.externalFresh) {

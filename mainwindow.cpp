@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "rangefinder_uart.h"
+#include "app_config.h"
 #include <cstdint>
 #include <atomic>
 #include <filesystem>
@@ -139,7 +140,8 @@ MainWindow::MainWindow(QWidget *parent)
     // NEW: отдельное окно для видео (UI НЕ ТРОГАЕМ!)
     // =========================================================
     videoWindow = new QWidget(nullptr, Qt::Window);
-    videoWindow->setWindowTitle("YOLO Video");
+    setWindowTitle("Target_Detection_System");
+    videoWindow->setWindowTitle("Target_Detection_System Video");
     videoWindow->resize(1100, 700);
     videoWindow->move(50, 50);
 
@@ -227,11 +229,6 @@ MainWindow::MainWindow(QWidget *parent)
                 rangefinderDescription = description;
                 updateSystemStatusPanel();
             });
-    connect(rf, &RangefinderUart::usbDevicesChanged, this,
-            [this](const QString& summary) {
-                usbDevicesSummary = summary;
-                updateSystemStatusPanel();
-            });
     rf->start();
 
     // УМНЫЙ СТАРТ CAN
@@ -275,11 +272,6 @@ MainWindow::MainWindow(QWidget *parent)
             [this](bool connected, const QString& description) {
                 externalDeviceConnected = connected;
                 externalDeviceDescription = description;
-                updateSystemStatusPanel();
-            });
-    connect(uartReceiver, &UartReceiver::usbDevicesChanged, this,
-            [this](const QString& summary) {
-                usbDevicesSummary = summary;
                 updateSystemStatusPanel();
             });
 
@@ -343,7 +335,6 @@ void MainWindow::setupSystemStatusPanel()
     statusRangefinder = addStatusRow(layout, row++, "Дальномер");
     statusDistance = addStatusRow(layout, row++, "Дистанция");
     statusTurret = addStatusRow(layout, row++, "Башня");
-    statusUsb = addStatusRow(layout, row++, "USB");
 
     if (ui && ui->gridLayout) {
         ui->gridLayout->addWidget(systemStatusGroup, 3, 0, 1, 2);
@@ -368,20 +359,17 @@ void MainWindow::updateSystemStatusPanel()
         lastVideoFrameMs != 0 && (now - lastVideoFrameMs) <= CAMERA_FRAME_TIMEOUT_MS;
     const bool distanceFresh = targetDistanceFresh();
 
-    StatusLevel overallLevel = StatusLevel::Bad;
-    QString overallText = "DEGRADED";
-    if (canOk && cameraFramesFresh && turret.fresh &&
-        rangefinderConnected && distanceFresh &&
-        (target.activeSource != TargetManager::Source::None))
-    {
-        overallLevel = StatusLevel::Ok;
-        overallText = "OK";
-    } else if (canOk && cameraFramesFresh && turret.fresh) {
-        overallLevel = StatusLevel::Warn;
-        overallText = target.activeSource == TargetManager::Source::None
-            ? "NO TARGET"
-            : "PARTIAL";
-    }
+    const bool allDevicesAndTelemetryOk =
+        canOk &&
+        cameraFramesFresh &&
+        turret.fresh &&
+        externalDeviceConnected &&
+        target.externalLinkFresh &&
+        rangefinderConnected &&
+        distanceFresh;
+
+    StatusLevel overallLevel = allDevicesAndTelemetryOk ? StatusLevel::Ok : StatusLevel::Bad;
+    QString overallText = allDevicesAndTelemetryOk ? "OK" : "DEGRADED";
     setStatus(statusOverall, overallText, overallLevel);
 
     const QString canName = ui->cbCan->currentText().isEmpty()
@@ -426,9 +414,19 @@ void MainWindow::updateSystemStatusPanel()
                       .arg(target.externalElCentideg / 100.0, 0, 'f', 2)
                       .arg(shortDeviceText(externalDeviceDescription)),
                   StatusLevel::Ok);
+    } else if (externalDeviceConnected && target.externalLinkFresh && target.externalNoTarget) {
+        setStatus(statusExternal,
+                  "LINK OK, NO TARGET " + ageText(now, target.externalLastPacketMs) + " " +
+                      shortDeviceText(externalDeviceDescription),
+                  StatusLevel::Ok);
+    } else if (externalDeviceConnected && target.externalLinkFresh) {
+        setStatus(statusExternal,
+                  "LINK OK, INVALID TARGET " + ageText(now, target.externalLastPacketMs) + " " +
+                      shortDeviceText(externalDeviceDescription),
+                  StatusLevel::Warn);
     } else if (externalDeviceConnected) {
         setStatus(statusExternal,
-                  "STALE data " + ageText(now, target.externalLastSeenMs) + " " +
+                  "STALE link " + ageText(now, target.externalLastPacketMs) + " " +
                       shortDeviceText(externalDeviceDescription),
                   StatusLevel::Warn);
     } else {
@@ -476,8 +474,6 @@ void MainWindow::updateSystemStatusPanel()
                   "WAIT " + ageText(now, turret.last_update_ms),
                   StatusLevel::Warn);
     }
-
-    setStatus(statusUsb, usbDevicesSummary, StatusLevel::Neutral);
 }
 
 
@@ -655,6 +651,8 @@ void MainWindow::showDistance(int mm)
     QString msg = QString("Distance = %1 mm").arg(mm);
     MY_CONSOLE_A(msg);
 
+    if constexpr (app_config::kRangefinderSendDistanceToCan) {
+
     // 2. Формируем CAN кадр
     struct can_frame frame{};
     frame.can_id  = 0x09;  // ID = 9
@@ -673,6 +671,7 @@ void MainWindow::showDistance(int mm)
     // 3. Отправляем в CAN
     if (canReaderWriter) {
         canReaderWriter->writeCan(frame);
+    }
     }
 }
 

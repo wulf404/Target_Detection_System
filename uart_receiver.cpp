@@ -1,4 +1,5 @@
 #include "uart_receiver.h"
+#include "app_config.h"
 #include "serial_port_resolver.h"
 
 #include <cerrno>
@@ -114,7 +115,9 @@ bool UartReceiver::readFromOpenPort(int fd, const QString& devicePath)
                 const auto x = static_cast<std::int16_t>(raw_x);
                 const auto y = static_cast<std::int16_t>(raw_y);
 
-                if (x == -1 && y == -1) {
+                if (x == app_config::kExternalNoTargetAzCentideg &&
+                    y == app_config::kExternalNoTargetElCentideg)
+                {
                     emit pixelsReceived(0, 0, false);
                     continue;
                 }

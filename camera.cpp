@@ -1,6 +1,8 @@
 #include "camera.h"
+#include "app_config.h"
 
 #include <QFile>
+#include <QString>
 #include <QTimer>
 
 #include <opencv2/imgproc.hpp>
@@ -16,18 +18,41 @@
 // Для ELP 4K USB camera.
 // Приоритет: MJPEG 4K60.
 // ============================================================
-std::string Camera::buildUsbPipeline() const
+std::string Camera::buildUsbPipeline(const std::string& devicePath) const
 {
     return cv::format(
-        "v4l2src device=/dev/video0 io-mode=2 ! "
+        "v4l2src device=%s io-mode=2 ! "
         "image/jpeg,width=%d,height=%d,framerate=%d/1 ! "
         "jpegparse ! "
         "jpegdec ! "
         "videoconvert ! "
         "video/x-raw,format=BGR ! "
         "appsink drop=true max-buffers=1 sync=false",
+        devicePath.c_str(),
         camera_width, camera_height, camera_fps
     );
+}
+
+std::vector<std::string> Camera::cameraDeviceCandidates() const
+{
+    const std::string overridePath = app_config::kCameraDevicePathOverride;
+    std::vector<std::string> devices;
+
+    if (!overridePath.empty()) {
+        if (QFile::exists(QString::fromStdString(overridePath))) {
+            devices.push_back(overridePath);
+        }
+        return devices;
+    }
+
+    for (int i = 0; i < 10; ++i) {
+        const std::string path = "/dev/video" + std::to_string(i);
+        if (QFile::exists(QString::fromStdString(path))) {
+            devices.push_back(path);
+        }
+    }
+
+    return devices;
 }
 
 Camera::Camera([[maybe_unused]] QObject *parent, int width)
@@ -92,49 +117,69 @@ bool Camera::openDevice()
 {
     try
     {
-        const std::string pipeline = buildUsbPipeline();
-
-        std::cout << "[CAM][USB][GST] try open pipeline:\n" << pipeline << std::endl;
-
-        if (!video.open(pipeline, cv::CAP_GSTREAMER)) {
-            std::cerr << "[CAM][USB][GST] open failed" << std::endl;
+        const auto devices = cameraDeviceCandidates();
+        if (devices.empty()) {
+            std::cerr << "[CAM][USB][GST] no /dev/video* camera candidates" << std::endl;
             return false;
         }
 
-#ifdef CV_CAP_PROP_BUFFERSIZE
-        video.set(cv::CAP_PROP_BUFFERSIZE, 1);
-#endif
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        cv::Mat test;
-        for (int i = 0; i < 20; ++i) {
-            if (video.read(test) && !test.empty()) {
-                std::cout << "[CAM][USB][GST] opened OK: "
-                          << test.cols << "x" << test.rows
-                          << ", ch=" << test.channels()
-                          << ", req=" << camera_width << "x" << camera_height
-                          << "@" << camera_fps
-                          << std::endl;
-                return true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (video.isOpened()) {
+            video.release();
         }
 
-        std::cerr << "[CAM][USB][GST] open ok, but no frames." << std::endl;
-        video.release();
+        for (const std::string& devicePath : devices) {
+            const std::string pipeline = buildUsbPipeline(devicePath);
+
+            std::cout << "[CAM][USB][GST] try open " << devicePath
+                      << " pipeline:\n" << pipeline << std::endl;
+
+            if (!video.open(pipeline, cv::CAP_GSTREAMER)) {
+                std::cerr << "[CAM][USB][GST] open failed: " << devicePath << std::endl;
+                continue;
+            }
+
+#ifdef CV_CAP_PROP_BUFFERSIZE
+            video.set(cv::CAP_PROP_BUFFERSIZE, 1);
+#endif
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+            cv::Mat test;
+            for (int i = 0; i < 20; ++i) {
+                if (video.read(test) && !test.empty()) {
+                    current_device_path = devicePath;
+                    std::cout << "[CAM][USB][GST] opened OK: "
+                              << current_device_path << " "
+                              << test.cols << "x" << test.rows
+                              << ", ch=" << test.channels()
+                              << ", req=" << camera_width << "x" << camera_height
+                              << "@" << camera_fps
+                              << std::endl;
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+
+            std::cerr << "[CAM][USB][GST] open ok, but no frames: "
+                      << devicePath << std::endl;
+            video.release();
+        }
+
+        current_device_path.clear();
         return false;
     }
     catch (const cv::Exception &e)
     {
         std::cerr << "[CAM][USB][GST][OpenCV EXCEPTION] " << e.what() << std::endl;
         if (video.isOpened()) video.release();
+        current_device_path.clear();
         return false;
     }
     catch (const std::exception &e)
     {
         std::cerr << "[CAM][USB][GST][std EXCEPTION] " << e.what() << std::endl;
         if (video.isOpened()) video.release();
+        current_device_path.clear();
         return false;
     }
 }
@@ -146,6 +191,7 @@ void Camera::closeDevice()
         std::cout << "[CAM] device closed" << std::endl;
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
+    current_device_path.clear();
 }
 
 void Camera::run()
@@ -155,8 +201,15 @@ void Camera::run()
         setStopped(false);
         setStarted(true);
 
-        for (int attempt = 0; attempt < 20 && !openDevice(); ++attempt) {
+        while (!isStopped() && !openDevice()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+
+        if (isStopped()) {
+            closeDevice();
+            setStopped(true);
+            setStarted(false);
+            return;
         }
 
         if (!video.isOpened()) {
@@ -212,21 +265,17 @@ void Camera::run()
                     closeDevice();
                     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-                    bool reopened = false;
-                    for (int t = 0; t < 30 && !isStopped(); ++t) {
+                    while (!isStopped()) {
                         if (openDevice()) {
-                            reopened = true;
+                            std::cerr << "[CAM][USB][GST] reconnected OK\n";
+                            bad_reads_in_row = 0;
+                            t_prev = cv::getTickCount();
                             break;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(300));
                     }
 
-                    if (reopened) {
-                        std::cerr << "[CAM][USB][GST] reconnected OK\n";
-                        bad_reads_in_row = 0;
-                        t_prev = cv::getTickCount();
-                    } else {
-                        std::cerr << "[CAM][USB][GST] reconnect failed\n";
+                    if (isStopped()) {
                         break;
                     }
                     continue;
@@ -361,9 +410,8 @@ void Camera::checkAndReconnect()
         return;
     }
 
-    const std::string devPath = "/dev/video0";
-    if (!QFile::exists(QString::fromStdString(devPath))) {
-        std::cerr << "[CAM][USB][GST] device missing, waiting..." << std::endl;
+    if (cameraDeviceCandidates().empty()) {
+        std::cerr << "[CAM][USB][GST] no camera device, waiting..." << std::endl;
         if (!reconnectTimer) reconnectTimer = new QTimer(this);
         reconnectTimer->singleShot(1000, this, &Camera::checkAndReconnect);
         return;
@@ -1142,4 +1190,3 @@ void Camera::checkAndReconnect()
 ////        reconnectTimer->singleShot(1000, this, &Camera::checkAndReconnect);
 ////    }
 ////}
-

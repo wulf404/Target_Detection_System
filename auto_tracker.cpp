@@ -1,4 +1,5 @@
 #include "auto_tracker.h"
+#include "app_config.h"
 #include "can_work.h"
 #include "tower_state.h"
 #include "turret_command.h"
@@ -11,8 +12,8 @@
 
 extern std::atomic<can_work*> g_can;
 
-static constexpr double CAMERA_FOV_H_DEG = 25.0;
-static constexpr double CAMERA_FOV_V_DEG = 14.5;
+static constexpr double CAMERA_FOV_H_DEG = app_config::kCameraFovHDeg;
+static constexpr double CAMERA_FOV_V_DEG = app_config::kCameraFovVDeg;
 
 double g_AZ_K = 1.0;
 double g_EL_K = 1.0;
@@ -51,7 +52,8 @@ void resetTrackerState()
 
 void AutoTracker::processPixelCenter(const cv::Point& center)
 {
-    processPixelCenter(center, cv::Size(1920, 1080));
+    processPixelCenter(center, cv::Size(app_config::kCameraRequestedWidth,
+                                        app_config::kCameraRequestedWidth * 9 / 16));
 }
 
 void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& frameSize)
@@ -105,10 +107,6 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
     }
 
     const TurretState turret = getTurretState();
-    if (!turret.fresh) {
-        resetTrackerState();
-        return;
-    }
 
     const auto target = turret_control::normalize({
         turret.az_deg + az_cmd_rel,
@@ -121,7 +119,7 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
         g_tracker_state.hold_start_t = now;
     }
 
-    if (g_tracker_state.have_last_target) {
+    if (turret.fresh && g_tracker_state.have_last_target) {
         const double eaz = std::abs(turret.az_deg - g_tracker_state.last_target_az);
         const double eel = std::abs(turret.el_deg - g_tracker_state.last_target_el);
         const bool reached = (eaz < REACH_EPS_DEG) && (eel < REACH_EPS_DEG);
@@ -161,4 +159,13 @@ void AutoTracker::reset()
 {
     std::lock_guard<std::mutex> lock(g_tracker_mutex);
     resetTrackerState();
+}
+
+AutoTracker::OverlayConfig AutoTracker::overlayConfig()
+{
+    return {
+        g_DEADZONE_X_PX,
+        g_DEADZONE_Y_PX,
+        g_enableDeadzone
+    };
 }

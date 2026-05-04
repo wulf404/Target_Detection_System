@@ -19,9 +19,12 @@ public:
         Source activeSource = Source::None;
         bool cameraFresh = false;
         bool externalFresh = false;
+        bool externalLinkFresh = false;
+        bool externalNoTarget = false;
         int externalAzCentideg = 0;
         int externalElCentideg = 0;
         uint64_t externalLastSeenMs = 0;
+        uint64_t externalLastPacketMs = 0;
     };
 
     static void submitCameraTarget(const cv::Point& center, const cv::Size& frameSize);

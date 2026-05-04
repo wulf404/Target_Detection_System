@@ -1,4 +1,6 @@
 #include "my_yolo.h"
+#include "auto_tracker.h"
+#include "app_config.h"
 #include "target_manager.h"
 
 #include <algorithm>
@@ -25,6 +27,69 @@ constexpr double AREA_SCORE = 0.7;
 constexpr double DIST_PENALTY = 0.6;
 constexpr double STICKY_RADIUS_PX = 260.0;
 constexpr double STICKY_BONUS = 180.0;
+
+void drawDashedLine(cv::Mat& frame,
+                    const cv::Point& from,
+                    const cv::Point& to,
+                    const cv::Scalar& color,
+                    int thickness = 2,
+                    double dash_px = 18.0,
+                    double gap_px = 10.0)
+{
+    const double dx = static_cast<double>(to.x - from.x);
+    const double dy = static_cast<double>(to.y - from.y);
+    const double length = std::hypot(dx, dy);
+    if (length < 1.0) {
+        return;
+    }
+
+    const cv::Point2d unit(dx / length, dy / length);
+    for (double start = 0.0; start < length; start += dash_px + gap_px) {
+        const double end = std::min(start + dash_px, length);
+        const cv::Point p1(
+            cvRound(from.x + unit.x * start),
+            cvRound(from.y + unit.y * start)
+        );
+        const cv::Point p2(
+            cvRound(from.x + unit.x * end),
+            cvRound(from.y + unit.y * end)
+        );
+        cv::line(frame, p1, p2, color, thickness, cv::LINE_AA);
+    }
+}
+
+void drawTrackingOverlay(cv::Mat& frame, const cv::Point* selectedCenter)
+{
+    if (frame.empty()) {
+        return;
+    }
+
+    const cv::Point center(frame.cols / 2, frame.rows / 2);
+    const auto overlay = AutoTracker::overlayConfig();
+
+    const cv::Scalar center_color(255, 255, 0);
+    const cv::Scalar deadzone_color(0, 210, 255);
+    const cv::Scalar line_color(0, 255, 120);
+
+    cv::drawMarker(frame, center, center_color, cv::MARKER_CROSS, 34, 2, cv::LINE_AA);
+    cv::circle(frame, center, 4, center_color, cv::FILLED, cv::LINE_AA);
+
+    if (overlay.deadzoneEnabled) {
+        const cv::Rect deadzone(
+            center.x - overlay.deadzoneX,
+            center.y - overlay.deadzoneY,
+            overlay.deadzoneX * 2,
+            overlay.deadzoneY * 2
+        );
+        cv::rectangle(frame, deadzone & cv::Rect(0, 0, frame.cols, frame.rows),
+                      deadzone_color, 2, cv::LINE_AA);
+    }
+
+    if (selectedCenter) {
+        drawDashedLine(frame, center, *selectedCenter, line_color, 2);
+        cv::circle(frame, *selectedCenter, 6, line_color, cv::FILLED, cv::LINE_AA);
+    }
+}
 
 double targetScore(const TargetCandidate& candidate,
                    bool have_last_target,
@@ -55,7 +120,7 @@ my_yolo::my_yolo()
     cv::setUseOptimized(true);
 #endif
 
-    weightPath = "/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx";
+    weightPath = app_config::kYoloWeightsPath;
 
     if (weightPath.find("_1280") != std::string::npos)      yolo_width = yolo_height = 1280;
     else if (weightPath.find("_1920") != std::string::npos) yolo_width = yolo_height = 1920;
@@ -80,7 +145,7 @@ my_yolo::my_yolo()
     mean   = cv::Scalar(120,120,120);
     swapRB = true;
 
-    loadClasses("/home/nick/qt/yolo_quadro_weights/quadro_3000.names");
+    loadClasses(app_config::kYoloClassesPath);
 
     classIds.reserve(256);
     confidences.reserve(256);
@@ -283,6 +348,11 @@ yolo_output my_yolo::run(cv::Mat &frame)
         }
     }
 
+    const cv::Point* selectedCenter = nullptr;
+    if (selected >= 0) {
+        selectedCenter = &candidates[selected].center;
+    }
+
     for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
     {
         const TargetCandidate& candidate = candidates[i];
@@ -305,6 +375,8 @@ yolo_output my_yolo::run(cv::Mat &frame)
         output.points.push_back(candidate.center);
         output.area.push_back(candidate.area);
     }
+
+    drawTrackingOverlay(frame, selectedCenter);
 
     if (selected >= 0) {
         const TargetCandidate& target = candidates[selected];

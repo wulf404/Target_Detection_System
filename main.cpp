@@ -23,6 +23,8 @@ int main(int argc, char *argv[])
     //system("bash /home/nick/Desktop/pwm_max.sh");
 
     QApplication a(argc, argv);
+    QApplication::setApplicationName("Target_Detection_System");
+    QApplication::setApplicationDisplayName("Target Detection System");
 
     // Регистрация метатипов для сигналов/слотов между потоками
     qRegisterMetaType<cv::Mat>("cv::Mat");
