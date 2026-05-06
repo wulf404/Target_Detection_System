@@ -55,6 +55,23 @@ std::vector<std::string> Camera::cameraDeviceCandidates() const
     return devices;
 }
 
+void Camera::publishDeviceState(bool connected, const std::string& description)
+{
+    const QString text = description.empty()
+        ? QString("not found")
+        : QString::fromStdString(description);
+
+    if (camera_device_connected == connected &&
+        camera_device_description == text)
+    {
+        return;
+    }
+
+    camera_device_connected = connected;
+    camera_device_description = text;
+    emit deviceStateChanged(connected, text);
+}
+
 Camera::Camera([[maybe_unused]] QObject *parent, int width)
 {
     CV_Assert(width > 100);
@@ -120,8 +137,10 @@ bool Camera::openDevice()
         const auto devices = cameraDeviceCandidates();
         if (devices.empty()) {
             std::cerr << "[CAM][USB][GST] no /dev/video* camera candidates" << std::endl;
+            publishDeviceState(false, "not found");
             return false;
         }
+        publishDeviceState(true, devices.front());
 
         if (video.isOpened()) {
             video.release();
@@ -148,6 +167,7 @@ bool Camera::openDevice()
             for (int i = 0; i < 20; ++i) {
                 if (video.read(test) && !test.empty()) {
                     current_device_path = devicePath;
+                    publishDeviceState(true, current_device_path);
                     std::cout << "[CAM][USB][GST] opened OK: "
                               << current_device_path << " "
                               << test.cols << "x" << test.rows
@@ -166,6 +186,7 @@ bool Camera::openDevice()
         }
 
         current_device_path.clear();
+        publishDeviceState(true, "open failed");
         return false;
     }
     catch (const cv::Exception &e)
@@ -173,6 +194,7 @@ bool Camera::openDevice()
         std::cerr << "[CAM][USB][GST][OpenCV EXCEPTION] " << e.what() << std::endl;
         if (video.isOpened()) video.release();
         current_device_path.clear();
+        publishDeviceState(true, "OpenCV exception");
         return false;
     }
     catch (const std::exception &e)
@@ -180,6 +202,7 @@ bool Camera::openDevice()
         std::cerr << "[CAM][USB][GST][std EXCEPTION] " << e.what() << std::endl;
         if (video.isOpened()) video.release();
         current_device_path.clear();
+        publishDeviceState(true, "std exception");
         return false;
     }
 }

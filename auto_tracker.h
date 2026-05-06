@@ -10,7 +10,10 @@ public:
     {
         int deadzoneX = 0;
         int deadzoneY = 0;
+        int deadzoneOuterX = 0;
+        int deadzoneOuterY = 0;
         bool deadzoneEnabled = false;
+        bool deadzoneHoldActive = false;
     };
 
     static void processPixelCenter(const cv::Point& center, const cv::Size& frameSize);

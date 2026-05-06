@@ -131,8 +131,10 @@ private:
 
     bool externalDeviceConnected = false;
     bool rangefinderConnected = false;
+    bool cameraDeviceConnected = false;
     QString externalDeviceDescription = "not found";
     QString rangefinderDescription = "not found";
+    QString cameraDeviceDescription = "not found";
     uint64_t lastVideoFrameMs = 0;
 
     static QImage matToQImageRGB(const cv::Mat &bgr);

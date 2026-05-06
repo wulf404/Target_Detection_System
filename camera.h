@@ -5,6 +5,7 @@
 #include <opencv2/core/mat.hpp>
 #include <opencv2/videoio.hpp>
 
+#include <QString>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@ public:
 
 signals:
     void output_frame(const cv::Mat &frame);
+    void deviceStateChanged(bool connected, const QString& description);
 
 protected:
     void run() override;
@@ -34,6 +36,7 @@ private:
     void closeDevice();
     std::vector<std::string> cameraDeviceCandidates() const;
     std::string buildUsbPipeline(const std::string& devicePath) const;
+    void publishDeviceState(bool connected, const std::string& description);
 
 private:
     QTimer *reconnectTimer = nullptr;
@@ -48,6 +51,8 @@ private:
     my_yolo *Yolo = nullptr;
     cv::VideoCapture video;
     std::string current_device_path;
+    bool camera_device_connected = false;
+    QString camera_device_description = "not found";
 
 public slots:
     void checkAndReconnect();

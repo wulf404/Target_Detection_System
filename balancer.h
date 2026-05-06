@@ -2,6 +2,7 @@
 #define BALANCER_H
 
 #include <QObject>
+#include <QString>
 #include <QThreadPool>
 
 #include "camera.h"
@@ -26,6 +27,7 @@ signals:
 
     // кадр для MainWindow
     void ui_frame(const cv::Mat &frame);
+    void cameraDeviceStateChanged(bool connected, const QString& description);
 
 private:
     QThreadPool *tp = nullptr;

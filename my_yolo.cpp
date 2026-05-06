@@ -69,18 +69,29 @@ void drawTrackingOverlay(cv::Mat& frame, const cv::Point* selectedCenter)
 
     const cv::Scalar center_color(255, 255, 0);
     const cv::Scalar deadzone_color(0, 210, 255);
+    const cv::Scalar deadzone_outer_color = overlay.deadzoneHoldActive
+        ? cv::Scalar(0, 170, 255)
+        : cv::Scalar(90, 150, 210);
     const cv::Scalar line_color(0, 255, 120);
 
     cv::drawMarker(frame, center, center_color, cv::MARKER_CROSS, 34, 2, cv::LINE_AA);
     cv::circle(frame, center, 4, center_color, cv::FILLED, cv::LINE_AA);
 
     if (overlay.deadzoneEnabled) {
+        const cv::Rect outer_deadzone(
+            center.x - overlay.deadzoneOuterX,
+            center.y - overlay.deadzoneOuterY,
+            overlay.deadzoneOuterX * 2,
+            overlay.deadzoneOuterY * 2
+        );
         const cv::Rect deadzone(
             center.x - overlay.deadzoneX,
             center.y - overlay.deadzoneY,
             overlay.deadzoneX * 2,
             overlay.deadzoneY * 2
         );
+        cv::rectangle(frame, outer_deadzone & cv::Rect(0, 0, frame.cols, frame.rows),
+                      deadzone_outer_color, 1, cv::LINE_AA);
         cv::rectangle(frame, deadzone & cv::Rect(0, 0, frame.cols, frame.rows),
                       deadzone_color, 2, cv::LINE_AA);
     }

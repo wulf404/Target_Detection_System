@@ -164,6 +164,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(balancer, &Balancer::ui_frame,
             this, &MainWindow::onNewFrame,
             Qt::QueuedConnection);
+    connect(balancer, &Balancer::cameraDeviceStateChanged,
+            this,
+            [this](bool connected, const QString& description) {
+                cameraDeviceConnected = connected;
+                cameraDeviceDescription = description;
+                updateSystemStatusPanel();
+            },
+            Qt::QueuedConnection);
 
     connect(ui->start, &QPushButton::pressed, balancer, &Balancer::startAll);
     connect(ui->stop,  &QPushButton::pressed, balancer, &Balancer::stopAll);
@@ -359,17 +367,26 @@ void MainWindow::updateSystemStatusPanel()
         lastVideoFrameMs != 0 && (now - lastVideoFrameMs) <= CAMERA_FRAME_TIMEOUT_MS;
     const bool distanceFresh = targetDistanceFresh();
 
-    const bool allDevicesAndTelemetryOk =
+    const bool allDevicesDetected =
         canOk &&
+        cameraDeviceConnected &&
+        externalDeviceConnected &&
+        rangefinderConnected;
+    const bool allFeedbackFresh =
         cameraFramesFresh &&
         turret.fresh &&
-        externalDeviceConnected &&
         target.externalLinkFresh &&
-        rangefinderConnected &&
         distanceFresh;
 
-    StatusLevel overallLevel = allDevicesAndTelemetryOk ? StatusLevel::Ok : StatusLevel::Bad;
-    QString overallText = allDevicesAndTelemetryOk ? "OK" : "DEGRADED";
+    StatusLevel overallLevel = StatusLevel::Bad;
+    QString overallText = "DEVICE MISSING";
+    if (allDevicesDetected && allFeedbackFresh) {
+        overallLevel = StatusLevel::Ok;
+        overallText = "OK";
+    } else if (allDevicesDetected) {
+        overallLevel = StatusLevel::Warn;
+        overallText = "STABLE, WAIT DATA";
+    }
     setStatus(statusOverall, overallText, overallLevel);
 
     const QString canName = ui->cbCan->currentText().isEmpty()
@@ -380,16 +397,24 @@ void MainWindow::updateSystemStatusPanel()
         : QString("WAIT %1").arg(canName);
     setStatus(statusCan, canText, canOk ? StatusLevel::Ok : StatusLevel::Bad);
 
-    if (cameraFramesFresh) {
+    if (!cameraDeviceConnected) {
         setStatus(statusCamera,
-                  "OK frame " + ageText(now, lastVideoFrameMs),
+                  "WAIT " + shortDeviceText(cameraDeviceDescription),
+                  StatusLevel::Bad);
+    } else if (cameraFramesFresh) {
+        setStatus(statusCamera,
+                  "OK frame " + ageText(now, lastVideoFrameMs) + " " +
+                      shortDeviceText(cameraDeviceDescription),
                   StatusLevel::Ok);
     } else if (lastVideoFrameMs == 0) {
-        setStatus(statusCamera, "WAIT no frames", StatusLevel::Bad);
+        setStatus(statusCamera,
+                  "WAIT no frames " + shortDeviceText(cameraDeviceDescription),
+                  StatusLevel::Warn);
     } else {
         setStatus(statusCamera,
-                  "STALE frame " + ageText(now, lastVideoFrameMs),
-                  StatusLevel::Bad);
+                  "STALE frame " + ageText(now, lastVideoFrameMs) + " " +
+                      shortDeviceText(cameraDeviceDescription),
+                  StatusLevel::Warn);
     }
 
     const StatusLevel sourceLevel = target.activeSource == TargetManager::Source::None

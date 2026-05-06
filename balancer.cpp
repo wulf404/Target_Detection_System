@@ -17,6 +17,8 @@ Balancer::Balancer(QObject *parent) : QObject(parent)
     connect(this, &Balancer::closeTasks, camera, &Camera::deleteLater);
 
     connect(camera, &Camera::output_frame, this, &Balancer::frames_watcher);
+    connect(camera, &Camera::deviceStateChanged,
+            this, &Balancer::cameraDeviceStateChanged);
 }
 
 Balancer::~Balancer()

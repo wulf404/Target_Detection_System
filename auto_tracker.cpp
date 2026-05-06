@@ -4,6 +4,7 @@
 #include "tower_state.h"
 #include "turret_command.h"
 
+#include <algorithm>
 #include <cmath>
 #include <atomic>
 #include <chrono>
@@ -38,7 +39,11 @@ struct TrackerRuntimeState
     double last_target_el = 0.0;
     double az_rel_f = 0.0;
     double el_rel_f = 0.0;
+    double center_x_f = 0.0;
+    double center_y_f = 0.0;
     bool have_last_target = false;
+    bool have_filtered_center = false;
+    bool deadzone_hold_active = false;
 };
 
 std::mutex g_tracker_mutex;
@@ -47,6 +52,18 @@ TrackerRuntimeState g_tracker_state;
 void resetTrackerState()
 {
     g_tracker_state = TrackerRuntimeState{};
+}
+
+int deadzoneOuterX()
+{
+    return std::max(g_DEADZONE_X_PX + 1,
+                    static_cast<int>(std::round(g_DEADZONE_X_PX * 1.45)));
+}
+
+int deadzoneOuterY()
+{
+    return std::max(g_DEADZONE_Y_PX + 1,
+                    static_cast<int>(std::round(g_DEADZONE_Y_PX * 1.45)));
 }
 } // namespace
 
@@ -69,6 +86,7 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
     static constexpr int MAX_HOLD_MS = 100;
     static constexpr double MIN_DELTA_DEG = 0.02;
     static constexpr double LPF_ALPHA = 0.35;
+    static constexpr double CENTER_LPF_ALPHA = 0.25;
 
     using clock = clock_type;
 
@@ -77,14 +95,46 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
     const double cx = frame_width / 2.0;
     const double cy = frame_height / 2.0;
 
-    const double dx = static_cast<double>(center.x) - cx;
-    const double dy = static_cast<double>(center.y) - cy;
+    if (!g_tracker_state.have_filtered_center) {
+        g_tracker_state.center_x_f = static_cast<double>(center.x);
+        g_tracker_state.center_y_f = static_cast<double>(center.y);
+        g_tracker_state.have_filtered_center = true;
+    } else {
+        g_tracker_state.center_x_f =
+            (1.0 - CENTER_LPF_ALPHA) * g_tracker_state.center_x_f +
+            CENTER_LPF_ALPHA * static_cast<double>(center.x);
+        g_tracker_state.center_y_f =
+            (1.0 - CENTER_LPF_ALPHA) * g_tracker_state.center_y_f +
+            CENTER_LPF_ALPHA * static_cast<double>(center.y);
+    }
 
-    if (g_enableDeadzone &&
-        std::abs(dx) < g_DEADZONE_X_PX &&
-        std::abs(dy) < g_DEADZONE_Y_PX)
-    {
-        return;
+    const double dx = g_tracker_state.center_x_f - cx;
+    const double dy = g_tracker_state.center_y_f - cy;
+
+    if (g_enableDeadzone) {
+        const double abs_dx = std::abs(dx);
+        const double abs_dy = std::abs(dy);
+        const bool insideInner =
+            abs_dx <= static_cast<double>(g_DEADZONE_X_PX) &&
+            abs_dy <= static_cast<double>(g_DEADZONE_Y_PX);
+        const bool insideOuter =
+            abs_dx <= static_cast<double>(deadzoneOuterX()) &&
+            abs_dy <= static_cast<double>(deadzoneOuterY());
+
+        if (insideInner) {
+            g_tracker_state.deadzone_hold_active = true;
+            g_tracker_state.az_rel_f = 0.0;
+            g_tracker_state.el_rel_f = 0.0;
+            return;
+        }
+
+        if (g_tracker_state.deadzone_hold_active && insideOuter) {
+            g_tracker_state.az_rel_f = 0.0;
+            g_tracker_state.el_rel_f = 0.0;
+            return;
+        }
+
+        g_tracker_state.deadzone_hold_active = false;
     }
 
     const double nx = dx / frame_width;
@@ -149,7 +199,9 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
 
     turret_control::sendPosition(can, target);
 
-    std::cout << "[AUTO TRACK] pixel=(" << center.x << "," << center.y << ") -> "
+    std::cout << "[AUTO TRACK] pixel=(" << center.x << "," << center.y << ")"
+              << " filtered=(" << std::lround(g_tracker_state.center_x_f)
+              << "," << std::lround(g_tracker_state.center_y_f) << ") -> "
               << "AZ=" << target.az << "  EL=" << target.el
               << "  (relAZ=" << az_cmd_rel << " relEL=" << el_cmd_rel << ")"
               << std::endl;
@@ -163,9 +215,13 @@ void AutoTracker::reset()
 
 AutoTracker::OverlayConfig AutoTracker::overlayConfig()
 {
+    std::lock_guard<std::mutex> lock(g_tracker_mutex);
     return {
         g_DEADZONE_X_PX,
         g_DEADZONE_Y_PX,
-        g_enableDeadzone
+        deadzoneOuterX(),
+        deadzoneOuterY(),
+        g_enableDeadzone,
+        g_tracker_state.deadzone_hold_active
     };
 }
