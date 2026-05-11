@@ -4,7 +4,8 @@
 
 namespace app_config {
 
-constexpr int kCameraRequestedWidth = 1920;
+// Main input camera width. Change this value to switch 4K/FullHD/etc.
+constexpr int kCameraRequestedWidth = 3840;
 // Keep empty for automatic /dev/video0..9 probing.
 constexpr const char* kCameraDevicePathOverride = "";
 

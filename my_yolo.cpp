@@ -387,11 +387,9 @@ yolo_output my_yolo::run(cv::Mat &frame)
         output.area.push_back(candidate.area);
     }
 
-    drawTrackingOverlay(frame, selectedCenter);
-
     if (selected >= 0) {
         const TargetCandidate& target = candidates[selected];
-        TargetManager::submitCameraTarget(target.center, frame.size());
+        TargetManager::submitCameraTarget(target.center, target.box, frame.size());
 
         last_target_center = target.center;
         have_last_target = true;
@@ -402,6 +400,8 @@ yolo_output my_yolo::run(cv::Mat &frame)
         }
         TargetManager::submitCameraMiss();
     }
+
+    drawTrackingOverlay(frame, selectedCenter);
     tm_drawpack.stop();
 
     tm_total.stop();

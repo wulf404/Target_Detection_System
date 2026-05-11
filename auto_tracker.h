@@ -18,6 +18,7 @@ public:
 
     static void processPixelCenter(const cv::Point& center, const cv::Size& frameSize);
     static void processPixelCenter(const cv::Point& center);
+    static void processTarget(const cv::Point& center, const cv::Rect& targetBox, const cv::Size& frameSize);
     static void reset();
     static OverlayConfig overlayConfig();
 };

@@ -136,6 +136,11 @@ void refreshSourceAfterNonCameraEvent(uint64_t now, const char* reason)
 
 void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Size& frameSize)
 {
+    submitCameraTarget(center, cv::Rect(), frameSize);
+}
+
+void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Rect& targetBox, const cv::Size& frameSize)
+{
     updateMainCamSeen(true);
 
     {
@@ -143,7 +148,7 @@ void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Size& 
         setActiveSource(Source::Camera, "camera target");
     }
 
-    AutoTracker::processPixelCenter(center, frameSize);
+    AutoTracker::processTarget(center, targetBox, frameSize);
 }
 
 void TargetManager::submitCameraMiss()

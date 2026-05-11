@@ -41,6 +41,10 @@ struct TrackerRuntimeState
     double el_rel_f = 0.0;
     double center_x_f = 0.0;
     double center_y_f = 0.0;
+    int active_deadzone_x = 0;
+    int active_deadzone_y = 0;
+    int active_deadzone_outer_x = 0;
+    int active_deadzone_outer_y = 0;
     bool have_last_target = false;
     bool have_filtered_center = false;
     bool deadzone_hold_active = false;
@@ -54,16 +58,45 @@ void resetTrackerState()
     g_tracker_state = TrackerRuntimeState{};
 }
 
-int deadzoneOuterX()
+struct DeadzoneConfig
 {
-    return std::max(g_DEADZONE_X_PX + 1,
-                    static_cast<int>(std::round(g_DEADZONE_X_PX * 1.45)));
+    int innerX = 0;
+    int innerY = 0;
+    int outerX = 0;
+    int outerY = 0;
+};
+
+int outerDeadzoneFromInner(int inner)
+{
+    return std::max(inner + 1, static_cast<int>(std::round(inner * 1.55)));
 }
 
-int deadzoneOuterY()
+DeadzoneConfig deadzoneForTarget(const cv::Rect& targetBox)
 {
-    return std::max(g_DEADZONE_Y_PX + 1,
-                    static_cast<int>(std::round(g_DEADZONE_Y_PX * 1.45)));
+    static constexpr double INNER_BOX_RATIO = 0.35;
+    static constexpr int MIN_DYNAMIC_DEADZONE_PX = 16;
+
+    DeadzoneConfig config;
+
+    if (targetBox.width > 0 && targetBox.height > 0) {
+        config.innerX = std::clamp(
+            static_cast<int>(std::round(targetBox.width * INNER_BOX_RATIO)),
+            MIN_DYNAMIC_DEADZONE_PX,
+            std::max(MIN_DYNAMIC_DEADZONE_PX, g_DEADZONE_X_PX)
+        );
+        config.innerY = std::clamp(
+            static_cast<int>(std::round(targetBox.height * INNER_BOX_RATIO)),
+            MIN_DYNAMIC_DEADZONE_PX,
+            std::max(MIN_DYNAMIC_DEADZONE_PX, g_DEADZONE_Y_PX)
+        );
+    } else {
+        config.innerX = g_DEADZONE_X_PX;
+        config.innerY = g_DEADZONE_Y_PX;
+    }
+
+    config.outerX = outerDeadzoneFromInner(config.innerX);
+    config.outerY = outerDeadzoneFromInner(config.innerY);
+    return config;
 }
 } // namespace
 
@@ -74,6 +107,11 @@ void AutoTracker::processPixelCenter(const cv::Point& center)
 }
 
 void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& frameSize)
+{
+    processTarget(center, cv::Rect(), frameSize);
+}
+
+void AutoTracker::processTarget(const cv::Point& center, const cv::Rect& targetBox, const cv::Size& frameSize)
 {
     std::lock_guard<std::mutex> lock(g_tracker_mutex);
 
@@ -94,6 +132,11 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
     const double frame_height = static_cast<double>(frameSize.height);
     const double cx = frame_width / 2.0;
     const double cy = frame_height / 2.0;
+    const DeadzoneConfig deadzone = deadzoneForTarget(targetBox);
+    g_tracker_state.active_deadzone_x = deadzone.innerX;
+    g_tracker_state.active_deadzone_y = deadzone.innerY;
+    g_tracker_state.active_deadzone_outer_x = deadzone.outerX;
+    g_tracker_state.active_deadzone_outer_y = deadzone.outerY;
 
     if (!g_tracker_state.have_filtered_center) {
         g_tracker_state.center_x_f = static_cast<double>(center.x);
@@ -115,11 +158,11 @@ void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& fr
         const double abs_dx = std::abs(dx);
         const double abs_dy = std::abs(dy);
         const bool insideInner =
-            abs_dx <= static_cast<double>(g_DEADZONE_X_PX) &&
-            abs_dy <= static_cast<double>(g_DEADZONE_Y_PX);
+            abs_dx <= static_cast<double>(deadzone.innerX) &&
+            abs_dy <= static_cast<double>(deadzone.innerY);
         const bool insideOuter =
-            abs_dx <= static_cast<double>(deadzoneOuterX()) &&
-            abs_dy <= static_cast<double>(deadzoneOuterY());
+            abs_dx <= static_cast<double>(deadzone.outerX) &&
+            abs_dy <= static_cast<double>(deadzone.outerY);
 
         if (insideInner) {
             g_tracker_state.deadzone_hold_active = true;
@@ -217,10 +260,18 @@ AutoTracker::OverlayConfig AutoTracker::overlayConfig()
 {
     std::lock_guard<std::mutex> lock(g_tracker_mutex);
     return {
-        g_DEADZONE_X_PX,
-        g_DEADZONE_Y_PX,
-        deadzoneOuterX(),
-        deadzoneOuterY(),
+        g_tracker_state.active_deadzone_x > 0
+            ? g_tracker_state.active_deadzone_x
+            : g_DEADZONE_X_PX,
+        g_tracker_state.active_deadzone_y > 0
+            ? g_tracker_state.active_deadzone_y
+            : g_DEADZONE_Y_PX,
+        g_tracker_state.active_deadzone_outer_x > 0
+            ? g_tracker_state.active_deadzone_outer_x
+            : outerDeadzoneFromInner(g_DEADZONE_X_PX),
+        g_tracker_state.active_deadzone_outer_y > 0
+            ? g_tracker_state.active_deadzone_outer_y
+            : outerDeadzoneFromInner(g_DEADZONE_Y_PX),
         g_enableDeadzone,
         g_tracker_state.deadzone_hold_active
     };

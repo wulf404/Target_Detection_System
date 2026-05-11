@@ -2,6 +2,8 @@
 #define CAMERA_H
 
 #include <my_yolo.h>
+#include "app_config.h"
+
 #include <opencv2/core/mat.hpp>
 #include <opencv2/videoio.hpp>
 
@@ -15,7 +17,7 @@ class Camera : public TaskRunner
 {
     Q_OBJECT
 public:
-    explicit Camera(QObject *parent = nullptr, int width = 3840);
+    explicit Camera(QObject *parent = nullptr, int width = app_config::kCameraRequestedWidth);
     ~Camera() override;
 
     void setInferEveryN(int n) { infer_every_n = (n <= 0 ? 1 : n); }
@@ -41,8 +43,8 @@ private:
 private:
     QTimer *reconnectTimer = nullptr;
 
-    int camera_width  = 3840;
-    int camera_height = 2160;
+    int camera_width  = app_config::kCameraRequestedWidth;
+    int camera_height = 0;
     int camera_fps    = 60;
 
     int infer_every_n = 1;
