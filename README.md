@@ -112,11 +112,10 @@ CAN telemetry -> can_work -> TurretState / UI/status
 
 ## Сборка
 
-Проектный файл остается `SO_rev1.pro`, но бинарная цель qmake переименована в
-`Target_Detection_System`.
+Проектный файл и бинарная цель qmake называются `Target_Detection_System`.
 
 ```bash
-qmake SO_rev1.pro
+qmake Target_Detection_System.pro
 make -j$(nproc)
 ```
 
