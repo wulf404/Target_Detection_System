@@ -8,10 +8,212 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/core/utility.hpp>
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <sstream>
+
+namespace {
+namespace fs = std::filesystem;
+
+struct VideoDeviceInfo
+{
+    std::string devPath;
+    std::string name;
+    std::string vid;
+    std::string pid;
+    int index = 0;
+    int score = 0;
+};
+
+std::string trim(std::string value)
+{
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string lowerCopy(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+std::string readFirstLine(const fs::path& path)
+{
+    std::ifstream file(path);
+    std::string line;
+    if (file && std::getline(file, line)) {
+        return trim(line);
+    }
+    return {};
+}
+
+std::string normalizeHexId(std::string value)
+{
+    value = lowerCopy(trim(value));
+    if (value.rfind("0x", 0) == 0) {
+        value.erase(0, 2);
+    }
+    return value;
+}
+
+bool containsInsensitive(const std::string& text, const std::string& needle)
+{
+    if (needle.empty()) {
+        return false;
+    }
+    return lowerCopy(text).find(lowerCopy(needle)) != std::string::npos;
+}
+
+std::string readFromAncestor(const fs::path& start, const char* fileName)
+{
+    std::error_code ec;
+    fs::path current = fs::weakly_canonical(start, ec);
+    if (ec) {
+        current = start;
+    }
+
+    while (!current.empty()) {
+        const std::string value = readFirstLine(current / fileName);
+        if (!value.empty()) {
+            return value;
+        }
+        if (current == current.root_path()) {
+            break;
+        }
+        current = current.parent_path();
+    }
+    return {};
+}
+
+int parseVideoIndex(const std::string& name)
+{
+    if (name.rfind("video", 0) != 0) {
+        return 9999;
+    }
+    try {
+        return std::stoi(name.substr(5));
+    } catch (...) {
+        return 9999;
+    }
+}
+
+int cameraPreferenceScore(const VideoDeviceInfo& info)
+{
+    int score = 0;
+    const std::string preferredVid = normalizeHexId(app_config::kCameraPreferredVid);
+    const std::string preferredPid = normalizeHexId(app_config::kCameraPreferredPid);
+    const std::string preferredName = app_config::kCameraPreferredNameContains;
+
+    if (!preferredVid.empty() && info.vid == preferredVid) {
+        score += 40;
+    }
+    if (!preferredPid.empty() && info.pid == preferredPid) {
+        score += 40;
+    }
+    if (!preferredVid.empty() && !preferredPid.empty() &&
+        info.vid == preferredVid && info.pid == preferredPid)
+    {
+        score += 80;
+    }
+    if (containsInsensitive(info.name, preferredName)) {
+        score += 50;
+    }
+    return score;
+}
+
+VideoDeviceInfo readVideoDeviceInfo(const std::string& devPath)
+{
+    VideoDeviceInfo info;
+    info.devPath = devPath;
+
+    const std::string nodeName = fs::path(devPath).filename().string();
+    info.index = parseVideoIndex(nodeName);
+
+    const fs::path sysPath = fs::path("/sys/class/video4linux") / nodeName;
+    info.name = readFirstLine(sysPath / "name");
+
+    const fs::path devicePath = sysPath / "device";
+    info.vid = normalizeHexId(readFromAncestor(devicePath, "idVendor"));
+    info.pid = normalizeHexId(readFromAncestor(devicePath, "idProduct"));
+    info.score = cameraPreferenceScore(info);
+    return info;
+}
+
+std::string describeVideoDevice(const VideoDeviceInfo& info,
+                                int reqWidth,
+                                int reqHeight,
+                                int reqFps,
+                                int actualWidth = 0,
+                                int actualHeight = 0,
+                                double actualFps = 0.0)
+{
+    std::ostringstream out;
+    out << info.devPath;
+    if (!info.name.empty()) {
+        out << " " << info.name;
+    }
+    if (!info.vid.empty() || !info.pid.empty()) {
+        out << " [" << (info.vid.empty() ? "????" : info.vid)
+            << ":" << (info.pid.empty() ? "????" : info.pid) << "]";
+    }
+    out << " requested " << reqWidth << "x" << reqHeight << "@" << reqFps;
+    if (actualWidth > 0 && actualHeight > 0) {
+        const int fpsRounded = actualFps > 0.5
+            ? static_cast<int>(std::round(actualFps))
+            : reqFps;
+        out << " actual " << actualWidth << "x" << actualHeight << "@" << fpsRounded;
+    }
+    return out.str();
+}
+
+std::vector<VideoDeviceInfo> scanVideoDevices()
+{
+    std::vector<VideoDeviceInfo> devices;
+    std::error_code ec;
+    const fs::path root("/sys/class/video4linux");
+    if (!fs::exists(root, ec)) {
+        return devices;
+    }
+
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (ec) {
+            break;
+        }
+        const std::string nodeName = entry.path().filename().string();
+        if (nodeName.rfind("video", 0) != 0) {
+            continue;
+        }
+
+        const std::string devPath = "/dev/" + nodeName;
+        if (!QFile::exists(QString::fromStdString(devPath))) {
+            continue;
+        }
+        devices.push_back(readVideoDeviceInfo(devPath));
+    }
+
+    std::sort(devices.begin(), devices.end(),
+              [](const VideoDeviceInfo& a, const VideoDeviceInfo& b) {
+                  if (a.score != b.score) {
+                      return a.score > b.score;
+                  }
+                  return a.index < b.index;
+              });
+    return devices;
+}
+} // namespace
 
 // ============================================================
 // USB GStreamer pipeline
@@ -45,10 +247,21 @@ std::vector<std::string> Camera::cameraDeviceCandidates() const
         return devices;
     }
 
-    for (int i = 0; i < 10; ++i) {
-        const std::string path = "/dev/video" + std::to_string(i);
-        if (QFile::exists(QString::fromStdString(path))) {
-            devices.push_back(path);
+    const auto scannedDevices = scanVideoDevices();
+    for (const VideoDeviceInfo& info : scannedDevices) {
+        std::cout << "[CAM][USB][SCAN] "
+                  << describeVideoDevice(info, camera_width, camera_height, camera_fps)
+                  << " score=" << info.score
+                  << std::endl;
+        devices.push_back(info.devPath);
+    }
+
+    if (devices.empty()) {
+        for (int i = 0; i < 10; ++i) {
+            const std::string path = "/dev/video" + std::to_string(i);
+            if (QFile::exists(QString::fromStdString(path))) {
+                devices.push_back(path);
+            }
         }
     }
 
@@ -140,7 +353,10 @@ bool Camera::openDevice()
             publishDeviceState(false, "not found");
             return false;
         }
-        publishDeviceState(true, devices.front());
+        publishDeviceState(true, describeVideoDevice(readVideoDeviceInfo(devices.front()),
+                                                     camera_width,
+                                                     camera_height,
+                                                     camera_fps));
 
         if (video.isOpened()) {
             video.release();
@@ -167,13 +383,21 @@ bool Camera::openDevice()
             for (int i = 0; i < 20; ++i) {
                 if (video.read(test) && !test.empty()) {
                     current_device_path = devicePath;
-                    publishDeviceState(true, current_device_path);
+                    const double actualFps = video.get(cv::CAP_PROP_FPS);
+                    publishDeviceState(true, describeVideoDevice(readVideoDeviceInfo(current_device_path),
+                                                                 camera_width,
+                                                                 camera_height,
+                                                                 camera_fps,
+                                                                 test.cols,
+                                                                 test.rows,
+                                                                 actualFps));
                     std::cout << "[CAM][USB][GST] opened OK: "
                               << current_device_path << " "
                               << test.cols << "x" << test.rows
                               << ", ch=" << test.channels()
                               << ", req=" << camera_width << "x" << camera_height
                               << "@" << camera_fps
+                              << ", actual_fps=" << actualFps
                               << std::endl;
                     return true;
                 }

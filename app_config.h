@@ -8,6 +8,9 @@ namespace app_config {
 constexpr int kCameraRequestedWidth = 3840;
 // Keep empty for automatic /dev/video0..9 probing.
 constexpr const char* kCameraDevicePathOverride = "";
+constexpr const char* kCameraPreferredNameContains = "HDMI USB Camera";
+constexpr const char* kCameraPreferredVid = "32e4";
+constexpr const char* kCameraPreferredPid = "3415";
 
 constexpr const char* kYoloWeightsPath = "/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx";
 constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quadro_3000.names";

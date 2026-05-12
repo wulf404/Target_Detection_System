@@ -122,10 +122,10 @@ QString targetSourceText(TargetManager::Source source)
 
 QString shortDeviceText(const QString& text)
 {
-    if (text.size() <= 72) {
+    if (text.size() <= 128) {
         return text;
     }
-    return text.left(69) + "...";
+    return text.left(125) + "...";
 }
 
 } // namespace
