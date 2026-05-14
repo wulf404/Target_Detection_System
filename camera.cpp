@@ -295,13 +295,18 @@ Camera::Camera([[maybe_unused]] QObject *parent, int width)
     camera_width = width;
     applyUsbDefaults();
 
-    Yolo = new my_yolo;
-    Yolo->setPerfPrintEvery(30);
+    if (app_config::kUseDeepStream) {
+        DeepStream = new DeepStreamYolo;
+    } else {
+        Yolo = new my_yolo;
+        Yolo->setPerfPrintEvery(30);
+    }
 }
 
 Camera::~Camera()
 {
     closeDevice();
+    delete DeepStream;
     delete Yolo;
 }
 
@@ -344,6 +349,64 @@ void Camera::applyUsbDefaults()
 }
 
 bool Camera::openDevice()
+{
+    if (app_config::kUseDeepStream) {
+        return openDeepStreamDevice();
+    }
+    return openOpenCvDevice();
+}
+
+bool Camera::openDeepStreamDevice()
+{
+    try
+    {
+        if (!DeepStream) {
+            DeepStream = new DeepStreamYolo;
+        }
+
+        const auto devices = cameraDeviceCandidates();
+        if (devices.empty()) {
+            std::cerr << "[CAM][DS] no /dev/video* camera candidates" << std::endl;
+            publishDeviceState(false, "not found");
+            return false;
+        }
+
+        if (DeepStream->isOpened()) {
+            DeepStream->close();
+        }
+
+        for (const std::string& devicePath : devices) {
+            std::cout << "[CAM][DS] try open " << devicePath << std::endl;
+            publishDeviceState(true, describeVideoDevice(readVideoDeviceInfo(devicePath),
+                                                         camera_width,
+                                                         camera_height,
+                                                         camera_fps));
+
+            if (DeepStream->open(devicePath, camera_width, camera_height, camera_fps)) {
+                current_device_path = devicePath;
+                publishDeviceState(true, DeepStream->statusText());
+                std::cout << "[CAM][DS] opened OK: " << DeepStream->statusText() << std::endl;
+                return true;
+            }
+        }
+
+        current_device_path.clear();
+        publishDeviceState(true, "DeepStream open failed");
+        return false;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[CAM][DS][std EXCEPTION] " << e.what() << std::endl;
+        if (DeepStream) {
+            DeepStream->close();
+        }
+        current_device_path.clear();
+        publishDeviceState(true, "DeepStream exception");
+        return false;
+    }
+}
+
+bool Camera::openOpenCvDevice()
 {
     try
     {
@@ -433,6 +496,10 @@ bool Camera::openDevice()
 
 void Camera::closeDevice()
 {
+    if (DeepStream && DeepStream->isOpened()) {
+        DeepStream->close();
+        std::cout << "[CAM][DS] device closed" << std::endl;
+    }
     if (video.isOpened()) {
         video.release();
         std::cout << "[CAM] device closed" << std::endl;
@@ -459,8 +526,15 @@ void Camera::run()
             return;
         }
 
-        if (!video.isOpened()) {
+        const bool deepStreamMode = app_config::kUseDeepStream;
+        if (!deepStreamMode && !video.isOpened()) {
             std::cerr << "[CAM] start failed: device not opened" << std::endl;
+            setStopped(true);
+            setStarted(false);
+            return;
+        }
+        if (deepStreamMode && (!DeepStream || !DeepStream->isOpened())) {
+            std::cerr << "[CAM][DS] start failed: pipeline not opened" << std::endl;
             setStopped(true);
             setStarted(false);
             return;
@@ -499,7 +573,16 @@ void Camera::run()
             // 1) read
             // ========================================================
             tm_read.start();
-            const bool ok = video.read(frame);
+            bool ok = false;
+            if (deepStreamMode) {
+                ok = DeepStream && DeepStream->read(frame, yolo_enabled);
+                if (ok) {
+                    publishDeviceState(true, DeepStream->statusText());
+                    perf_yolo_runs++;
+                }
+            } else {
+                ok = video.read(frame);
+            }
             tm_read.stop();
 
             if (!ok || frame.empty())
@@ -557,7 +640,8 @@ void Camera::run()
             // ========================================================
             // 4) YOLO
             // ========================================================
-            const bool do_infer = yolo_enabled &&
+            const bool do_infer = !deepStreamMode &&
+                                  yolo_enabled &&
                                   (infer_every_n <= 1 || ((frame_id % infer_every_n) == 0));
 
             if (do_infer && Yolo)
@@ -575,15 +659,21 @@ void Camera::run()
 
             cv::resize(frame, frame, out_size);
 
-            std::string infer_text = yolo_enabled
-                ? ("1/" + std::to_string(infer_every_n))
-                : "OFF";
+            std::string infer_text;
+            if (!yolo_enabled) {
+                infer_text = "OFF";
+            } else if (deepStreamMode) {
+                infer_text = "DeepStream";
+            } else {
+                infer_text = "1/" + std::to_string(infer_every_n);
+            }
 
             char buf[200];
             std::snprintf(buf, sizeof(buf),
-                          "FPS: %.1f  infer: %s  src: USB-GST  %dx%d@%d",
+                          "FPS: %.1f  infer: %s  src: %s  %dx%d@%d",
                           fps_ema,
                           infer_text.c_str(),
+                          deepStreamMode ? "DeepStream" : "USB-GST",
                           camera_width,
                           camera_height,
                           camera_fps);
@@ -664,7 +754,13 @@ void Camera::checkAndReconnect()
         return;
     }
 
-    if (video.isOpened()) {
+    if (app_config::kUseDeepStream) {
+        if (DeepStream && DeepStream->isOpened()) {
+            if (!reconnectTimer) reconnectTimer = new QTimer(this);
+            reconnectTimer->singleShot(2000, this, &Camera::checkAndReconnect);
+            return;
+        }
+    } else if (video.isOpened()) {
         cv::Mat test;
         try {
             if (!video.read(test) || test.empty()) {

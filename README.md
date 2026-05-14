@@ -36,6 +36,9 @@ CAN telemetry -> can_work -> TurretState / UI/status
 | --- | --- |
 | `kCameraDevicePathOverride` | Принудительный путь камеры. По умолчанию пустой, поэтому камера ищется автоматически через `/sys/class/video4linux`. |
 | `kCameraPreferredNameContains`, `kCameraPreferredVid`, `kCameraPreferredPid` | Предпочитаемая USB-камера. Сейчас `HDMI USB Camera`, `32e4:3415`. |
+| `kUseDeepStream` | Включает DeepStream/TensorRT pipeline вместо OpenCV DNN ONNX. |
+| `kDeepStreamEnginePath` | TensorRT engine для `nvinfer`. Сейчас `/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine`. |
+| `kDeepStreamNetworkInputWidth`, `kDeepStreamNetworkInputHeight` | Входной размер engine. Сейчас `1280x1280`. |
 | `kExternalNoTargetAzCentideg`, `kExternalNoTargetElCentideg` | Маркер "связь есть, цели нет". Сейчас это `-1, -1`, то есть yaw/pitch `-0.01`. |
 | `kRangefinderSendDistanceToCan` | Отправлять ли дальномер в CAN `0x09`. Сейчас `false`. |
 
@@ -105,7 +108,9 @@ CAN telemetry -> can_work -> TurretState / UI/status
 
 ## Камера
 
-Камера открывается через GStreamer/OpenCV. При старте и после пропадания потока
+Камера открывается через GStreamer: в DeepStream-режиме это pipeline с
+`nvv4l2decoder/nvstreammux/nvinfer`, в fallback-режиме используется OpenCV
+VideoCapture поверх GStreamer. При старте и после пропадания потока
 `Camera` сканирует `/sys/class/video4linux`, читает имя, VID/PID и предпочитает
 `HDMI USB Camera` с VID/PID `32e4:3415`. Если найдено несколько `/dev/video*`,
 сначала пробуются наиболее похожие устройства, а не просто первый номер.
@@ -114,6 +119,21 @@ CAN telemetry -> can_work -> TurretState / UI/status
 `requested 3840x2160@60 actual 3840x2160@60`. Если поток пропал после
 выдергивания USB-камеры, устройство закрывается и попытки открыть его снова
 продолжаются до восстановления, без перезапуска приложения.
+
+## DeepStream
+
+Основной режим инференса теперь задается `app_config::kUseDeepStream`. Когда он
+включен, используется GStreamer/DeepStream pipeline:
+
+```text
+v4l2src -> jpegparse -> nvv4l2decoder -> nvstreammux -> nvinfer -> appsink
+```
+
+`nvinfer` получает готовый TensorRT engine `quadron_1280_fp16.engine`.
+Конфиг `nvinfer` создается автоматически в `/tmp/target_detection_system_nvinfer.txt`.
+YOLO tensor output читается из `NvDsInferTensorMeta`, затем постобработка, NMS,
+выбор цели, динамическая мертвая зона и CAN-команды идут через прежние
+`TargetManager`, `AutoTracker`, `CAN/UART` модули.
 
 ## Сборка
 
@@ -129,8 +149,9 @@ make -j$(nproc)
 - Linux + SocketCAN;
 - Qt 5 Widgets + SerialPort;
 - OpenCV с CUDA/DNN;
-- CUDA/cuDNN;
-- GStreamer;
+- JetPack 6.2.1, CUDA 12.6, TensorRT 10.3, cuDNN 9.0;
+- DeepStream SDK 7.1.0;
+- GStreamer + NVIDIA DeepStream plugins;
 - `aarch64-linux-gnu-g++` на Jetson Orin NX.
 
 ## Основные Модули
@@ -139,6 +160,7 @@ make -j$(nproc)
 | --- | --- |
 | `app_config.h` | Ручные настройки камеры, YOLO, FOV и внешнего UART-маркера. |
 | `camera.*` | Захват и reconnect USB-камеры. |
+| `deepstream_yolo.*` | DeepStream/TensorRT inference через `nvinfer` и парсинг tensor meta. |
 | `my_yolo.*` | Инференс, выбор цели и отрисовка боксов/оверлея. |
 | `target_manager.*` | Приоритет источников цели и watchdog свежести данных. |
 | `auto_tracker.*` | Пересчет пиксельного смещения в команду башни. |

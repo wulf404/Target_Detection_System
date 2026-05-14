@@ -15,6 +15,14 @@ constexpr const char* kCameraPreferredPid = "3415";
 constexpr const char* kYoloWeightsPath = "/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx";
 constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quadro_3000.names";
 
+constexpr bool kUseDeepStream = true;
+constexpr const char* kDeepStreamEnginePath = "/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine";
+constexpr const char* kDeepStreamInferConfigPath = "/tmp/target_detection_system_nvinfer.txt";
+constexpr int kDeepStreamNetworkInputWidth = 1280;
+constexpr int kDeepStreamNetworkInputHeight = 1280;
+constexpr float kDeepStreamConfThreshold = 0.3f;
+constexpr float kDeepStreamNmsThreshold = 0.5f;
+
 constexpr double kCameraFovHDeg = 25.0;
 constexpr double kCameraFovVDeg = 14.5;
 

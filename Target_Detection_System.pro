@@ -8,6 +8,10 @@ DEFINES += QT_DEPRECATED_WARNINGS
 
 DEFINES += ENABLE_CUDA_PREPROCESS=1
 DEFINES += OPENCV_CPU_THREADS=1
+DEFINES += ENABLE_DEEPSTREAM=1
+
+CONFIG += link_pkgconfig
+PKGCONFIG += gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0
 
 OBJECTS_DIR = $$OUT_PWD/obj
 MOC_DIR     = $$OUT_PWD/moc
@@ -19,6 +23,7 @@ SOURCES += \
     balancer.cpp \
     camera.cpp \
     can_work.cpp \
+    deepstream_yolo.cpp \
     main.cpp \
     mainwindow.cpp \
     my_yolo.cpp \
@@ -41,6 +46,7 @@ HEADERS += \
     can_work.h \
     common_constants.h \
     cuda_preprocess.h \
+    deepstream_yolo.h \
     mainwindow.h \
     my_yolo.h \
     rangefinder_uart.h \
@@ -68,6 +74,13 @@ LIBS += -lopencv_videoio -lopencv_imgproc -lopencv_imgcodecs -lopencv_highgui -l
         -lopencv_tracking -lopencv_optflow -lopencv_video -lopencv_features2d -lopencv_dnn \
         -lopencv_cudafilters -lopencv_cudabgsegm -lopencv_cudafeatures2d -lopencv_dnn_superres -lopencv_cudaoptflow \
         -lopencv_cudacodec -lopencv_cudawarping -lopencv_cudaimgproc -lopencv_cudaarithm
+
+# ===== DeepStream 7.1 / JetPack 6.2.x =====
+DEEPSTREAM_DIR = /opt/nvidia/deepstream/deepstream
+INCLUDEPATH += $$DEEPSTREAM_DIR/sources/includes
+QMAKE_LIBDIR += $$DEEPSTREAM_DIR/lib
+LIBS += -Wl,-rpath,$$DEEPSTREAM_DIR/lib \
+        -lnvdsgst_meta -lnvds_meta -lnvds_inferutils
 
 # ===== CUDA / NVCC (qmake extra compiler) =====
 CUDA_DIR  = /usr/local/cuda

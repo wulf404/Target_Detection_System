@@ -3,6 +3,7 @@
 
 #include <my_yolo.h>
 #include "app_config.h"
+#include "deepstream_yolo.h"
 
 #include <opencv2/core/mat.hpp>
 #include <opencv2/videoio.hpp>
@@ -35,6 +36,8 @@ private:
     void applyUsbDefaults();
 
     bool openDevice();
+    bool openOpenCvDevice();
+    bool openDeepStreamDevice();
     void closeDevice();
     std::vector<std::string> cameraDeviceCandidates() const;
     std::string buildUsbPipeline(const std::string& devicePath) const;
@@ -51,6 +54,7 @@ private:
     bool yolo_enabled = true;
 
     my_yolo *Yolo = nullptr;
+    DeepStreamYolo *DeepStream = nullptr;
     cv::VideoCapture video;
     std::string current_device_path;
     bool camera_device_connected = false;
