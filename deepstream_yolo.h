@@ -39,10 +39,21 @@ private:
         double score = 0.0;
     };
 
+    struct PipelineDefinition
+    {
+        std::string name;
+        std::string text;
+    };
+
     static GstPadProbeReturn tensorProbe(GstPad* pad, GstPadProbeInfo* info, gpointer userData);
 
     bool writeInferConfig() const;
-    std::string buildPipeline(const std::string& devicePath, int width, int height, int fps) const;
+    std::vector<PipelineDefinition> buildPipelineCandidates(const std::string& devicePath,
+                                                            int width,
+                                                            int height,
+                                                            int fps) const;
+    bool createAndStartPipeline(const PipelineDefinition& definition);
+    bool primePipeline();
     bool checkBusErrors();
     void updateDetectionsFromBuffer(GstBuffer* buffer);
     std::vector<Detection> parseTensorMeta(void* tensorMeta, int frameWidth, int frameHeight) const;
@@ -66,4 +77,5 @@ private:
     int requestedFps = 0;
     int actualWidth = 0;
     int actualHeight = 0;
+    std::string currentPipelineName;
 };

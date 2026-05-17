@@ -222,18 +222,16 @@ bool DeepStreamYolo::writeInferConfig() const
     return true;
 }
 
-std::string DeepStreamYolo::buildPipeline(const std::string& devicePath,
-                                          int width,
-                                          int height,
-                                          int fps) const
+std::vector<DeepStreamYolo::PipelineDefinition>
+DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
+                                        int width,
+                                        int height,
+                                        int fps) const
 {
-    std::ostringstream pipelineText;
-    pipelineText
-        << "v4l2src device=" << devicePath << " io-mode=2 do-timestamp=true ! "
-        << "image/jpeg,width=" << width << ",height=" << height
-        << ",framerate=" << fps << "/1 ! "
-        << "jpegparse ! "
-        << "nvv4l2decoder mjpeg=1 ! "
+    std::vector<PipelineDefinition> candidates;
+
+    std::ostringstream inferTail;
+    inferTail
         << "queue leaky=2 max-size-buffers=2 ! "
         << "mux.sink_0 nvstreammux name=mux batch-size=1 width=" << width
         << " height=" << height << " live-source=1 batched-push-timeout=10000 ! "
@@ -243,26 +241,63 @@ std::string DeepStreamYolo::buildPipeline(const std::string& devicePath,
         << "videoconvert ! "
         << "video/x-raw,format=BGR ! "
         << "appsink name=appsink emit-signals=false sync=false max-buffers=1 drop=true";
-    return pipelineText.str();
-}
 
-bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, int fps)
-{
-    close();
-    if (!writeInferConfig()) {
-        return false;
+    {
+        std::ostringstream text;
+        text << "v4l2src device=" << devicePath << " io-mode=2 do-timestamp=true ! "
+             << "image/jpeg,width=" << width << ",height=" << height
+             << ",framerate=" << fps << "/1 ! "
+             << "jpegparse ! "
+             << "nvv4l2decoder mjpeg=1 ! "
+             << "nvvideoconvert ! "
+             << "video/x-raw(memory:NVMM),format=NV12,width=" << width
+             << ",height=" << height << " ! "
+             << inferTail.str();
+        candidates.push_back({"mjpeg-nvdec-nv12", text.str()});
     }
 
-    currentDevice = devicePath;
-    requestedWidth = width;
-    requestedHeight = height;
-    requestedFps = fps;
+    {
+        std::ostringstream text;
+        text << "v4l2src device=" << devicePath << " io-mode=2 do-timestamp=true ! "
+             << "video/x-h264,width=" << width << ",height=" << height
+             << ",framerate=" << fps << "/1 ! "
+             << "h264parse config-interval=-1 ! "
+             << "nvv4l2decoder ! "
+             << "nvvideoconvert ! "
+             << "video/x-raw(memory:NVMM),format=NV12,width=" << width
+             << ",height=" << height << " ! "
+             << inferTail.str();
+        candidates.push_back({"h264-nvdec-nv12", text.str()});
+    }
 
-    const std::string pipelineText = buildPipeline(devicePath, width, height, fps);
-    std::cout << "[DS][GST] pipeline:\n" << pipelineText << std::endl;
+    {
+        std::ostringstream text;
+        text << "v4l2src device=" << devicePath << " io-mode=2 do-timestamp=true ! "
+             << "image/jpeg,width=" << width << ",height=" << height
+             << ",framerate=" << fps << "/1 ! "
+             << "jpegparse ! "
+             << "jpegdec ! "
+             << "videoconvert ! "
+             << "video/x-raw,format=NV12,width=" << width
+             << ",height=" << height << " ! "
+             << "nvvideoconvert ! "
+             << "video/x-raw(memory:NVMM),format=NV12,width=" << width
+             << ",height=" << height << " ! "
+             << inferTail.str();
+        candidates.push_back({"mjpeg-cpujpeg-nv12", text.str()});
+    }
+
+    return candidates;
+}
+
+bool DeepStreamYolo::createAndStartPipeline(const PipelineDefinition& definition)
+{
+    currentPipelineName = definition.name;
+    std::cout << "[DS][GST] pipeline mode=" << definition.name
+              << ":\n" << definition.text << std::endl;
 
     GError* error = nullptr;
-    pipeline = gst_parse_launch(pipelineText.c_str(), &error);
+    pipeline = gst_parse_launch(definition.text.c_str(), &error);
     if (!pipeline) {
         std::cerr << "[DS][GST] gst_parse_launch failed: "
                   << (error ? error->message : "unknown") << std::endl;
@@ -300,6 +335,76 @@ bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, 
     }
 
     return true;
+}
+
+bool DeepStreamYolo::primePipeline()
+{
+    if (!isOpened()) {
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (!checkBusErrors()) {
+            return false;
+        }
+
+        GstSample* sample = gst_app_sink_try_pull_sample(GST_APP_SINK(appsink), 300 * GST_MSECOND);
+        if (!sample) {
+            continue;
+        }
+
+        GstCaps* caps = gst_sample_get_caps(sample);
+        GstVideoInfo videoInfo;
+        if (caps && gst_video_info_from_caps(&videoInfo, caps)) {
+            actualWidth = GST_VIDEO_INFO_WIDTH(&videoInfo);
+            actualHeight = GST_VIDEO_INFO_HEIGHT(&videoInfo);
+        }
+        gst_sample_unref(sample);
+        return true;
+    }
+
+    (void)checkBusErrors();
+    std::cerr << "[DS][GST] no frame from pipeline during startup probe" << std::endl;
+    return false;
+}
+
+bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, int fps)
+{
+    close();
+    if (!writeInferConfig()) {
+        return false;
+    }
+
+    currentDevice = devicePath;
+    requestedWidth = width;
+    requestedHeight = height;
+    requestedFps = fps;
+
+    const auto candidates = buildPipelineCandidates(devicePath, width, height, fps);
+    for (const PipelineDefinition& definition : candidates) {
+        close();
+        currentDevice = devicePath;
+        requestedWidth = width;
+        requestedHeight = height;
+        requestedFps = fps;
+
+        if (!createAndStartPipeline(definition)) {
+            close();
+            continue;
+        }
+
+        if (primePipeline()) {
+            std::cout << "[DS][GST] selected pipeline mode="
+                      << currentPipelineName << std::endl;
+            return true;
+        }
+
+        std::cerr << "[DS][GST] pipeline mode failed before first frame: "
+                  << definition.name << std::endl;
+        close();
+    }
+
+    return false;
 }
 
 bool DeepStreamYolo::isOpened() const
@@ -410,12 +515,17 @@ void DeepStreamYolo::close()
     }
     actualWidth = 0;
     actualHeight = 0;
+    currentPipelineName.clear();
 }
 
 std::string DeepStreamYolo::statusText() const
 {
     std::ostringstream out;
-    out << currentDevice << " DeepStream requested "
+    out << currentDevice << " DeepStream";
+    if (!currentPipelineName.empty()) {
+        out << "(" << currentPipelineName << ")";
+    }
+    out << " requested "
         << requestedWidth << "x" << requestedHeight << "@" << requestedFps;
     if (actualWidth > 0 && actualHeight > 0) {
         out << " actual " << actualWidth << "x" << actualHeight << "@" << requestedFps;
