@@ -73,8 +73,11 @@ LIBS += -lopencv_videoio -lopencv_imgproc -lopencv_imgcodecs -lopencv_highgui -l
 CUDA_DIR  = /usr/local/cuda
 
 INCLUDEPATH += $$CUDA_DIR/include
+INCLUDEPATH += /usr/include/aarch64-linux-gnu
 QMAKE_LIBDIR += $$CUDA_DIR/lib64
+QMAKE_LIBDIR += /usr/lib/aarch64-linux-gnu
 LIBS += -lcudart -lcuda -lcudnn
+LIBS += -lnvinfer -lnvinfer_plugin
 
 # Jetson Orin NX
 CUDA_ARCH = sm_87

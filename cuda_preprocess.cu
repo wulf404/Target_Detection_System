@@ -68,3 +68,37 @@ bool cuda_preprocess_bgr_to_nchw(
 
     return (cudaGetLastError() == cudaSuccess);
 }
+
+bool cuda_preprocess_bgr_to_nchw_ptr(
+    const cv::cuda::GpuMat& resized_bgr_u8,
+    float* out_blob_f32,
+    int out_w,
+    int out_h,
+    float scale,
+    float mean_b,
+    float mean_g,
+    float mean_r,
+    bool swapRB,
+    cudaStream_t stream)
+{
+    if (resized_bgr_u8.empty()) return false;
+    if (resized_bgr_u8.type() != CV_8UC3) return false;
+    if (resized_bgr_u8.cols != out_w || resized_bgr_u8.rows != out_h) return false;
+    if (!out_blob_f32) return false;
+
+    dim3 block(16, 16);
+    dim3 grid((out_w + block.x - 1) / block.x, (out_h + block.y - 1) / block.y);
+
+    const uchar3* src_ptr = (const uchar3*)resized_bgr_u8.ptr<unsigned char>();
+
+    k_bgr_u8_to_nchw_f32<<<grid, block, 0, stream>>>(
+        src_ptr,
+        (int)resized_bgr_u8.step,
+        out_blob_f32,
+        out_w, out_h,
+        scale, mean_b, mean_g, mean_r,
+        swapRB ? 1 : 0
+    );
+
+    return (cudaGetLastError() == cudaSuccess);
+}

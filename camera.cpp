@@ -576,7 +576,7 @@ void Camera::run()
             cv::resize(frame, frame, out_size);
 
             std::string infer_text = yolo_enabled
-                ? ("1/" + std::to_string(infer_every_n))
+                ? ("TRT 1/" + std::to_string(infer_every_n))
                 : "OFF";
 
             char buf[200];

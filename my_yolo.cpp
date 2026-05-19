@@ -3,9 +3,14 @@
 #include "app_config.h"
 #include "target_manager.h"
 
+#include <NvInferPlugin.h>
+
 #include <algorithm>
+#include <cstdint>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <stdexcept>
 
 static inline double ms(const cv::TickMeter& tm) { return tm.getTimeMilli(); }
 
@@ -27,6 +32,50 @@ constexpr double AREA_SCORE = 0.7;
 constexpr double DIST_PENALTY = 0.6;
 constexpr double STICKY_RADIUS_PX = 260.0;
 constexpr double STICKY_BONUS = 180.0;
+
+int64_t dimsVolume(const nvinfer1::Dims& dims)
+{
+    int64_t volume = 1;
+    for (int i = 0; i < dims.nbDims; ++i) {
+        if (dims.d[i] <= 0) {
+            return 0;
+        }
+        volume *= static_cast<int64_t>(dims.d[i]);
+    }
+    return volume;
+}
+
+size_t dataTypeSize(nvinfer1::DataType dataType)
+{
+    switch (dataType) {
+    case nvinfer1::DataType::kFLOAT:
+        return sizeof(float);
+    case nvinfer1::DataType::kHALF:
+        return sizeof(__half);
+    case nvinfer1::DataType::kINT8:
+        return sizeof(std::int8_t);
+    case nvinfer1::DataType::kINT32:
+        return sizeof(std::int32_t);
+    case nvinfer1::DataType::kBOOL:
+        return sizeof(bool);
+    default:
+        return 0;
+    }
+}
+
+std::string dimsToString(const nvinfer1::Dims& dims)
+{
+    std::ostringstream out;
+    out << "[";
+    for (int i = 0; i < dims.nbDims; ++i) {
+        if (i > 0) {
+            out << "x";
+        }
+        out << dims.d[i];
+    }
+    out << "]";
+    return out.str();
+}
 
 void drawDashedLine(cv::Mat& frame,
                     const cv::Point& from,
@@ -124,6 +173,13 @@ double targetScore(const TargetCandidate& candidate,
 
 } // namespace
 
+void my_yolo::TrtLogger::log(Severity severity, const char* msg) noexcept
+{
+    if (severity <= Severity::kWARNING) {
+        std::cerr << "[TRT] " << msg << std::endl;
+    }
+}
+
 my_yolo::my_yolo()
 {
 #if OPENCV_CPU_THREADS
@@ -131,7 +187,7 @@ my_yolo::my_yolo()
     cv::setUseOptimized(true);
 #endif
 
-    weightPath = app_config::kYoloWeightsPath;
+    weightPath = app_config::kYoloEnginePath;
 
     if (weightPath.find("_1280") != std::string::npos)      yolo_width = yolo_height = 1280;
     else if (weightPath.find("_1920") != std::string::npos) yolo_width = yolo_height = 1920;
@@ -142,12 +198,7 @@ my_yolo::my_yolo()
     CV_Assert(!weightPath.empty());
     CV_Assert(yolo_width > 0 && yolo_height > 0);
 
-    net = cv::dnn::readNet(weightPath);
-    net.setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
-    net.setPreferableTarget(cv::dnn::DNN_TARGET_CUDA_FP16);
-
-    net.enableFusion(false);
-    net.enableWinograd(false);
+    initTensorRt();
 
     confThreshold = 0.3f;
     nmsThreshold  = 0.5f;
@@ -166,7 +217,271 @@ my_yolo::my_yolo()
     outs.reserve(3);
 
     gpu_resized_u8.create(yolo_height, yolo_width, CV_8UC3);
-    gpu_blob_f32.create(yolo_height * 3, yolo_width, CV_32F);
+}
+
+my_yolo::~my_yolo()
+{
+    releaseTensorRt();
+}
+
+void my_yolo::releaseTensorRt()
+{
+    for (TrtOutputBinding& output : trtOutputs) {
+        if (output.device) {
+            cudaFree(output.device);
+            output.device = nullptr;
+        }
+        output.bytes = 0;
+    }
+    trtOutputs.clear();
+
+    if (trtInputDevice) {
+        cudaFree(trtInputDevice);
+        trtInputDevice = nullptr;
+    }
+    trtInputBytes = 0;
+
+    if (trtStream) {
+        cudaStreamDestroy(trtStream);
+        trtStream = nullptr;
+    }
+
+    trtContext.reset();
+    trtEngine.reset();
+    trtRuntime.reset();
+}
+
+void my_yolo::initTensorRt()
+{
+    std::ifstream engineFile(weightPath, std::ios::binary | std::ios::ate);
+    if (!engineFile) {
+        throw std::runtime_error("[TRT] cannot open engine: " + weightPath);
+    }
+
+    const std::streamsize engineSize = engineFile.tellg();
+    if (engineSize <= 0) {
+        throw std::runtime_error("[TRT] empty engine: " + weightPath);
+    }
+    engineFile.seekg(0, std::ios::beg);
+
+    std::vector<char> engineData(static_cast<size_t>(engineSize));
+    if (!engineFile.read(engineData.data(), engineSize)) {
+        throw std::runtime_error("[TRT] cannot read engine: " + weightPath);
+    }
+
+    initLibNvInferPlugins(&trtLogger, "");
+
+    trtRuntime.reset(nvinfer1::createInferRuntime(trtLogger));
+    if (!trtRuntime) {
+        throw std::runtime_error("[TRT] createInferRuntime failed");
+    }
+
+    trtEngine.reset(trtRuntime->deserializeCudaEngine(engineData.data(), engineData.size()));
+    if (!trtEngine) {
+        throw std::runtime_error("[TRT] deserializeCudaEngine failed: " + weightPath);
+    }
+
+    trtContext.reset(trtEngine->createExecutionContext());
+    if (!trtContext) {
+        throw std::runtime_error("[TRT] createExecutionContext failed");
+    }
+
+    if (cudaStreamCreateWithFlags(&trtStream, cudaStreamNonBlocking) != cudaSuccess) {
+        throw std::runtime_error("[TRT] cudaStreamCreateWithFlags failed");
+    }
+
+    if (!allocateTensorRtBuffers()) {
+        throw std::runtime_error("[TRT] allocate buffers failed");
+    }
+
+    std::cout << "[TRT] engine loaded: " << weightPath
+              << " input=" << trtInputName
+              << " size=" << yolo_width << "x" << yolo_height
+              << " outputs=" << trtOutputs.size()
+              << std::endl;
+}
+
+bool my_yolo::allocateTensorRtBuffers()
+{
+    if (!trtEngine || !trtContext) {
+        return false;
+    }
+
+    const int nbTensors = trtEngine->getNbIOTensors();
+    trtOutputs.clear();
+
+    for (int i = 0; i < nbTensors; ++i) {
+        const char* tensorName = trtEngine->getIOTensorName(i);
+        if (!tensorName) {
+            continue;
+        }
+
+        const nvinfer1::TensorIOMode mode = trtEngine->getTensorIOMode(tensorName);
+        if (mode == nvinfer1::TensorIOMode::kINPUT) {
+            trtInputName = tensorName;
+        } else if (mode == nvinfer1::TensorIOMode::kOUTPUT) {
+            TrtOutputBinding output;
+            output.name = tensorName;
+            output.dataType = trtEngine->getTensorDataType(tensorName);
+            trtOutputs.push_back(output);
+        }
+    }
+
+    if (trtInputName.empty() || trtOutputs.empty()) {
+        std::cerr << "[TRT] bad bindings: input=" << trtInputName
+                  << " outputs=" << trtOutputs.size() << std::endl;
+        return false;
+    }
+
+    nvinfer1::Dims inputDims = trtEngine->getTensorShape(trtInputName.c_str());
+    if (inputDims.nbDims == 4) {
+        inputDims.d[0] = 1;
+        inputDims.d[1] = 3;
+        inputDims.d[2] = yolo_height;
+        inputDims.d[3] = yolo_width;
+    } else if (inputDims.nbDims == 3) {
+        inputDims.d[0] = 3;
+        inputDims.d[1] = yolo_height;
+        inputDims.d[2] = yolo_width;
+    } else {
+        std::cerr << "[TRT] unsupported input dims: "
+                  << dimsToString(inputDims) << std::endl;
+        return false;
+    }
+
+    if (!trtContext->setInputShape(trtInputName.c_str(), inputDims)) {
+        std::cerr << "[TRT] setInputShape failed: "
+                  << dimsToString(inputDims) << std::endl;
+        return false;
+    }
+
+    const nvinfer1::DataType inputType = trtEngine->getTensorDataType(trtInputName.c_str());
+    if (inputType != nvinfer1::DataType::kFLOAT) {
+        std::cerr << "[TRT] unsupported input data type, expected FP32" << std::endl;
+        return false;
+    }
+
+    const int64_t inputVolume = dimsVolume(inputDims);
+    if (inputVolume <= 0) {
+        return false;
+    }
+    trtInputBytes = static_cast<size_t>(inputVolume) * sizeof(float);
+    if (cudaMalloc(&trtInputDevice, trtInputBytes) != cudaSuccess) {
+        std::cerr << "[TRT] cudaMalloc input failed, bytes=" << trtInputBytes << std::endl;
+        return false;
+    }
+    if (!trtContext->setTensorAddress(trtInputName.c_str(), trtInputDevice)) {
+        std::cerr << "[TRT] setTensorAddress input failed" << std::endl;
+        return false;
+    }
+
+    for (TrtOutputBinding& output : trtOutputs) {
+        output.dims = trtContext->getTensorShape(output.name.c_str());
+        const int64_t outputVolume = dimsVolume(output.dims);
+        const size_t elementSize = dataTypeSize(output.dataType);
+        if (outputVolume <= 0 || elementSize == 0) {
+            std::cerr << "[TRT] unsupported output " << output.name
+                      << " dims=" << dimsToString(output.dims) << std::endl;
+            return false;
+        }
+
+        output.bytes = static_cast<size_t>(outputVolume) * elementSize;
+        output.host.resize(static_cast<size_t>(outputVolume));
+        if (output.dataType == nvinfer1::DataType::kHALF) {
+            output.hostHalf.resize(static_cast<size_t>(outputVolume));
+        }
+
+        if (cudaMalloc(&output.device, output.bytes) != cudaSuccess) {
+            std::cerr << "[TRT] cudaMalloc output failed: " << output.name
+                      << " bytes=" << output.bytes << std::endl;
+            return false;
+        }
+        if (!trtContext->setTensorAddress(output.name.c_str(), output.device)) {
+            std::cerr << "[TRT] setTensorAddress output failed: "
+                      << output.name << std::endl;
+            return false;
+        }
+
+        std::cout << "[TRT] output " << output.name
+                  << " dims=" << dimsToString(output.dims)
+                  << " bytes=" << output.bytes
+                  << std::endl;
+    }
+
+    return true;
+}
+
+bool my_yolo::runTensorRt(std::vector<cv::Mat>& outputMats)
+{
+    outputMats.clear();
+    if (!trtContext || !trtStream || !trtInputDevice) {
+        return false;
+    }
+
+    if (!trtContext->setTensorAddress(trtInputName.c_str(), trtInputDevice)) {
+        return false;
+    }
+    for (TrtOutputBinding& output : trtOutputs) {
+        if (!trtContext->setTensorAddress(output.name.c_str(), output.device)) {
+            return false;
+        }
+    }
+
+    if (!trtContext->enqueueV3(trtStream)) {
+        std::cerr << "[TRT] enqueueV3 failed" << std::endl;
+        return false;
+    }
+
+    for (TrtOutputBinding& output : trtOutputs) {
+        if (output.dataType == nvinfer1::DataType::kFLOAT) {
+            if (cudaMemcpyAsync(output.host.data(),
+                                output.device,
+                                output.bytes,
+                                cudaMemcpyDeviceToHost,
+                                trtStream) != cudaSuccess)
+            {
+                return false;
+            }
+        } else if (output.dataType == nvinfer1::DataType::kHALF) {
+            if (cudaMemcpyAsync(output.hostHalf.data(),
+                                output.device,
+                                output.bytes,
+                                cudaMemcpyDeviceToHost,
+                                trtStream) != cudaSuccess)
+            {
+                return false;
+            }
+        } else {
+            std::cerr << "[TRT] unsupported output data type: " << output.name << std::endl;
+            return false;
+        }
+    }
+
+    if (cudaStreamSynchronize(trtStream) != cudaSuccess) {
+        std::cerr << "[TRT] stream synchronize failed" << std::endl;
+        return false;
+    }
+
+    for (TrtOutputBinding& output : trtOutputs) {
+        if (output.dataType == nvinfer1::DataType::kHALF) {
+            for (size_t i = 0; i < output.host.size(); ++i) {
+                output.host[i] = __half2float(output.hostHalf[i]);
+            }
+        }
+
+        std::vector<int> sizes;
+        sizes.reserve(output.dims.nbDims);
+        for (int i = 0; i < output.dims.nbDims; ++i) {
+            sizes.push_back(static_cast<int>(output.dims.d[i]));
+        }
+
+        outputMats.emplace_back(static_cast<int>(sizes.size()),
+                                sizes.data(),
+                                CV_32F,
+                                output.host.data());
+    }
+
+    return true;
 }
 
 void my_yolo::loadClasses(const std::string& namesPath)
@@ -197,12 +512,11 @@ yolo_output my_yolo::run(cv::Mat &frame)
     CV_Assert(!frame.empty());
     CV_Assert(frame.type() == CV_8UC3);
 
-    cv::Mat cpu_blob; // fallback
-
     // ============================
     // 2.1 blob (preprocess)
     // ============================
     tm_blob.start();
+    bool inputReady = false;
 #if ENABLE_CUDA_PREPROCESS
     try {
         gpu_frame_u8.upload(frame, gpu_stream);
@@ -213,9 +527,9 @@ yolo_output my_yolo::run(cv::Mat &frame)
 
         cudaStream_t s = cv::cuda::StreamAccessor::getStream(gpu_stream);
 
-        bool ok = cuda_preprocess_bgr_to_nchw(
+        bool ok = cuda_preprocess_bgr_to_nchw_ptr(
             gpu_resized_u8,
-            gpu_blob_f32,
+            static_cast<float*>(trtInputDevice),
             yolo_width, yolo_height,
             (float)scale,
             (float)mean[0], (float)mean[1], (float)mean[2],
@@ -225,29 +539,32 @@ yolo_output my_yolo::run(cv::Mat &frame)
 
         gpu_stream.waitForCompletion();
         if (!ok) throw std::runtime_error("cuda_preprocess_bgr_to_nchw failed");
-
-        try {
-            net.setInput(gpu_blob_f32);
-        } catch (...) {
-            gpu_blob_f32.download(cpu_blob, gpu_stream);
-            gpu_stream.waitForCompletion();
-
-            int sz[] = {1, 3, yolo_height, yolo_width};
-            cv::Mat blob4d(4, sz, CV_32F, cpu_blob.ptr<float>());
-            net.setInput(blob4d);
-        }
+        inputReady = true;
     } catch (...) {
         cv::Mat blob = cv::dnn::blobFromImage(frame, scale,
                                               cv::Size(yolo_width, yolo_height),
                                               mean, swapRB, false, CV_32F);
-        net.setInput(blob);
+        inputReady = (cudaMemcpyAsync(trtInputDevice,
+                                      blob.ptr<float>(),
+                                      trtInputBytes,
+                                      cudaMemcpyHostToDevice,
+                                      trtStream) == cudaSuccess &&
+                      cudaStreamSynchronize(trtStream) == cudaSuccess);
     }
 #else
     cv::Mat blob = cv::dnn::blobFromImage(frame, scale,
                                           cv::Size(yolo_width, yolo_height),
                                           mean, swapRB, false, CV_32F);
-    net.setInput(blob);
+    inputReady = (cudaMemcpyAsync(trtInputDevice,
+                                  blob.ptr<float>(),
+                                  trtInputBytes,
+                                  cudaMemcpyHostToDevice,
+                                  trtStream) == cudaSuccess &&
+                  cudaStreamSynchronize(trtStream) == cudaSuccess);
 #endif
+    if (!inputReady) {
+        throw std::runtime_error("[TRT] input preprocess/copy failed");
+    }
     tm_blob.stop();
 
     // ============================
@@ -255,7 +572,9 @@ yolo_output my_yolo::run(cv::Mat &frame)
     // ============================
     tm_fwd.start();
     outs.clear();
-    net.forward(outs, net.getUnconnectedOutLayersNames());
+    if (!runTensorRt(outs)) {
+        throw std::runtime_error("[TRT] inference failed");
+    }
     tm_fwd.stop();
 
     // ============================

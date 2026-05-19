@@ -4,6 +4,11 @@
 #include <common_constants.h>
 #include <opencv2/core/cuda_stream_accessor.hpp>
 
+#include <NvInfer.h>
+#include <cuda_fp16.h>
+
+#include <memory>
+
 #if ENABLE_CUDA_PREPROCESS
 #include "cuda_preprocess.h"
 #endif
@@ -12,6 +17,7 @@ class my_yolo
 {
 public:
     my_yolo();
+    ~my_yolo();
 
     // frame BGR CV_8UC3, рисование боксов может быть внутри (как сейчас)
     yolo_output run(cv::Mat &frame);
@@ -24,10 +30,44 @@ public:
     void setPerfDivisor(int k) { perf_divisor = (k <= 0 ? 1 : k); }
 
 private:
+    struct InferDeleter
+    {
+        template <typename T>
+        void operator()(T* object) const
+        {
+            delete object;
+        }
+    };
+
+    class TrtLogger final : public nvinfer1::ILogger
+    {
+    public:
+        void log(Severity severity, const char* msg) noexcept override;
+    };
+
+    struct TrtOutputBinding
+    {
+        std::string name;
+        nvinfer1::DataType dataType = nvinfer1::DataType::kFLOAT;
+        nvinfer1::Dims dims{};
+        void* device = nullptr;
+        size_t bytes = 0;
+        std::vector<float> host;
+        std::vector<__half> hostHalf;
+    };
+
     std::string weightPath;
     int yolo_width = 0, yolo_height = 0;
 
-    cv::dnn::Net net;
+    TrtLogger trtLogger;
+    std::unique_ptr<nvinfer1::IRuntime, InferDeleter> trtRuntime;
+    std::unique_ptr<nvinfer1::ICudaEngine, InferDeleter> trtEngine;
+    std::unique_ptr<nvinfer1::IExecutionContext, InferDeleter> trtContext;
+    std::string trtInputName;
+    void* trtInputDevice = nullptr;
+    size_t trtInputBytes = 0;
+    std::vector<TrtOutputBinding> trtOutputs;
+    cudaStream_t trtStream = nullptr;
 
     float confThreshold = 0.3f;
     float nmsThreshold  = 0.5f;
@@ -48,7 +88,6 @@ private:
     // GPU preprocess
     cv::cuda::GpuMat gpu_frame_u8;
     cv::cuda::GpuMat gpu_resized_u8;
-    cv::cuda::GpuMat gpu_blob_f32;
     cv::cuda::Stream gpu_stream;
 
     std::vector<cv::Mat> outs;
@@ -63,6 +102,10 @@ private:
     int lost_target_frames = 0;
 
     void loadClasses(const std::string& namesPath);
+    void initTensorRt();
+    void releaseTensorRt();
+    bool allocateTensorRtBuffers();
+    bool runTensorRt(std::vector<cv::Mat>& outputMats);
 };
 
 #endif // MY_YOLO_H

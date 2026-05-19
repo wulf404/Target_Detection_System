@@ -25,7 +25,8 @@ CAN telemetry -> can_work -> TurretState / UI/status
 | Параметр | Назначение |
 | --- | --- |
 | `kCameraRequestedWidth` | Желаемая входная ширина камеры. Сейчас `3840`, то есть 4K. Менять нужно здесь, а не в `camera.h`. |
-| `kYoloWeightsPath` | ONNX-веса YOLO. |
+| `kYoloEnginePath` | TensorRT engine YOLO. Сейчас `/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine`. |
+| `kYoloOnnxPath` | Старый ONNX путь, оставлен как справка: `/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx`. |
 | `kYoloClassesPath` | Файл классов YOLO. |
 | `kCameraFovHDeg`, `kCameraFovVDeg` | Горизонтальный и вертикальный угол камеры. |
 
@@ -130,6 +131,7 @@ make -j$(nproc)
 - Qt 5 Widgets + SerialPort;
 - OpenCV с CUDA/DNN;
 - CUDA/cuDNN;
+- TensorRT runtime (`nvinfer`, `nvinfer_plugin`);
 - GStreamer;
 - `aarch64-linux-gnu-g++` на Jetson Orin NX.
 
@@ -139,7 +141,7 @@ make -j$(nproc)
 | --- | --- |
 | `app_config.h` | Ручные настройки камеры, YOLO, FOV и внешнего UART-маркера. |
 | `camera.*` | Захват и reconnect USB-камеры. |
-| `my_yolo.*` | Инференс, выбор цели и отрисовка боксов/оверлея. |
+| `my_yolo.*` | TensorRT engine inference, выбор цели и отрисовка боксов/оверлея. |
 | `target_manager.*` | Приоритет источников цели и watchdog свежести данных. |
 | `auto_tracker.*` | Пересчет пиксельного смещения в команду башни. |
 | `uart_receiver.*` | Внешние координаты и heartbeat `-1, -1`. |
