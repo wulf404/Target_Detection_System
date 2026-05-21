@@ -57,7 +57,10 @@ private:
     bool checkBusErrors();
     void updateDetectionsFromBuffer(GstBuffer* buffer);
     std::vector<Detection> parseTensorMeta(void* tensorMeta, int frameWidth, int frameHeight) const;
-    void processDetections(cv::Mat& frame, const std::vector<Detection>& detections, bool trackingEnabled);
+    void processDetections(cv::Mat& frame,
+                           const std::vector<Detection>& detections,
+                           const cv::Size& sourceFrameSize,
+                           bool trackingEnabled);
     void loadClasses();
 
     GstElement* pipeline = nullptr;
@@ -65,6 +68,7 @@ private:
 
     mutable std::mutex detectionsMutex;
     std::vector<Detection> latestDetections;
+    cv::Size latestSourceFrameSize;
 
     std::vector<std::string> classes;
     cv::Point lastTargetCenter;
@@ -77,5 +81,7 @@ private:
     int requestedFps = 0;
     int actualWidth = 0;
     int actualHeight = 0;
+    int sourceWidth = 0;
+    int sourceHeight = 0;
     std::string currentPipelineName;
 };

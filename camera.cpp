@@ -657,7 +657,9 @@ void Camera::run()
             // ========================================================
             tm_vis.start();
 
-            cv::resize(frame, frame, out_size);
+            if (frame.size() != out_size) {
+                cv::resize(frame, frame, out_size);
+            }
 
             std::string infer_text;
             if (!yolo_enabled) {
@@ -706,10 +708,17 @@ void Camera::run()
                 const double avg_vis  = sum_vis  / perf_frames;
                 const double avg_emit = sum_emit / perf_frames;
 
+                std::cerr << "[PERF CAM] ";
+                if (deepStreamMode) {
+                    std::cerr
+                        << "1.ds_pipeline(read+infer)=" << avg_read << "ms, "
+                        << "2.yolo(timer)=inside-gst, ";
+                } else {
+                    std::cerr
+                        << "1.read=" << avg_read << "ms, "
+                        << "2.yolo(avg)=" << avg_yolo << "ms, ";
+                }
                 std::cerr
-                    << "[PERF CAM] "
-                    << "1.read=" << avg_read << "ms, "
-                    << "2.yolo(avg)=" << avg_yolo << "ms, "
                     << "3.vis=" << avg_vis << "ms, "
                     << "4.emit=" << avg_emit << "ms, "
                     << "infer_runs=" << perf_yolo_runs << "/" << perf_frames

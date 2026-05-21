@@ -20,6 +20,9 @@ constexpr const char* kDeepStreamEnginePath = "/home/nick/qt/yolo_quadro_weights
 constexpr const char* kDeepStreamInferConfigPath = "/tmp/target_detection_system_nvinfer.txt";
 constexpr int kDeepStreamNetworkInputWidth = 1280;
 constexpr int kDeepStreamNetworkInputHeight = 1280;
+constexpr int kDeepStreamDisplayWidth = 1280;
+constexpr int kDeepStreamDisplayHeight = 720;
+constexpr bool kDeepStreamPreferH264Capture = false;
 constexpr float kDeepStreamConfThreshold = 0.3f;
 constexpr float kDeepStreamNmsThreshold = 0.5f;
 

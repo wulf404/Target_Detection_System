@@ -120,14 +120,62 @@ void drawDashedLine(cv::Mat& frame,
     }
 }
 
-void drawTrackingOverlay(cv::Mat& frame, const cv::Point* selectedCenter)
+cv::Point scalePointToDisplay(const cv::Point& point,
+                              const cv::Size& sourceSize,
+                              const cv::Size& displaySize)
+{
+    if (sourceSize.width <= 0 || sourceSize.height <= 0) {
+        return point;
+    }
+
+    const double sx = static_cast<double>(displaySize.width) /
+                      static_cast<double>(sourceSize.width);
+    const double sy = static_cast<double>(displaySize.height) /
+                      static_cast<double>(sourceSize.height);
+    return cv::Point(cvRound(static_cast<double>(point.x) * sx),
+                     cvRound(static_cast<double>(point.y) * sy));
+}
+
+cv::Rect scaleRectToDisplay(const cv::Rect& rect,
+                            const cv::Size& sourceSize,
+                            const cv::Size& displaySize)
+{
+    if (sourceSize.width <= 0 || sourceSize.height <= 0) {
+        return rect & cv::Rect(0, 0, displaySize.width, displaySize.height);
+    }
+
+    const double sx = static_cast<double>(displaySize.width) /
+                      static_cast<double>(sourceSize.width);
+    const double sy = static_cast<double>(displaySize.height) /
+                      static_cast<double>(sourceSize.height);
+    cv::Rect scaled(cvRound(static_cast<double>(rect.x) * sx),
+                    cvRound(static_cast<double>(rect.y) * sy),
+                    cvRound(static_cast<double>(rect.width) * sx),
+                    cvRound(static_cast<double>(rect.height) * sy));
+    return scaled & cv::Rect(0, 0, displaySize.width, displaySize.height);
+}
+
+void drawTrackingOverlay(cv::Mat& frame,
+                         const cv::Point* selectedCenter,
+                         const cv::Size& sourceSize)
 {
     if (frame.empty()) {
         return;
     }
 
     const cv::Point center(frame.cols / 2, frame.rows / 2);
+    const cv::Size displaySize(frame.cols, frame.rows);
     const auto overlay = AutoTracker::overlayConfig();
+    const double sx = sourceSize.width > 0
+        ? static_cast<double>(displaySize.width) / static_cast<double>(sourceSize.width)
+        : 1.0;
+    const double sy = sourceSize.height > 0
+        ? static_cast<double>(displaySize.height) / static_cast<double>(sourceSize.height)
+        : 1.0;
+    const int deadzoneX = std::max(1, cvRound(static_cast<double>(overlay.deadzoneX) * sx));
+    const int deadzoneY = std::max(1, cvRound(static_cast<double>(overlay.deadzoneY) * sy));
+    const int deadzoneOuterX = std::max(1, cvRound(static_cast<double>(overlay.deadzoneOuterX) * sx));
+    const int deadzoneOuterY = std::max(1, cvRound(static_cast<double>(overlay.deadzoneOuterY) * sy));
 
     const cv::Scalar centerColor(255, 255, 0);
     const cv::Scalar deadzoneColor(0, 210, 255);
@@ -140,14 +188,14 @@ void drawTrackingOverlay(cv::Mat& frame, const cv::Point* selectedCenter)
     cv::circle(frame, center, 4, centerColor, cv::FILLED, cv::LINE_AA);
 
     if (overlay.deadzoneEnabled) {
-        const cv::Rect outerDeadzone(center.x - overlay.deadzoneOuterX,
-                                     center.y - overlay.deadzoneOuterY,
-                                     overlay.deadzoneOuterX * 2,
-                                     overlay.deadzoneOuterY * 2);
-        const cv::Rect deadzone(center.x - overlay.deadzoneX,
-                                center.y - overlay.deadzoneY,
-                                overlay.deadzoneX * 2,
-                                overlay.deadzoneY * 2);
+        const cv::Rect outerDeadzone(center.x - deadzoneOuterX,
+                                     center.y - deadzoneOuterY,
+                                     deadzoneOuterX * 2,
+                                     deadzoneOuterY * 2);
+        const cv::Rect deadzone(center.x - deadzoneX,
+                                center.y - deadzoneY,
+                                deadzoneX * 2,
+                                deadzoneY * 2);
         cv::rectangle(frame, outerDeadzone & cv::Rect(0, 0, frame.cols, frame.rows),
                       deadzoneOuterColor, 1, cv::LINE_AA);
         cv::rectangle(frame, deadzone & cv::Rect(0, 0, frame.cols, frame.rows),
@@ -236,10 +284,16 @@ DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
         << "mux.sink_0 nvstreammux name=mux batch-size=1 width=" << width
         << " height=" << height << " live-source=1 batched-push-timeout=10000 ! "
         << "nvinfer name=primary config-file-path=" << app_config::kDeepStreamInferConfigPath << " ! "
+        << "queue leaky=2 max-size-buffers=1 ! "
         << "nvvideoconvert ! "
-        << "video/x-raw,format=BGRx ! "
+        << "video/x-raw(memory:NVMM),format=NV12,width=" << app_config::kDeepStreamDisplayWidth
+        << ",height=" << app_config::kDeepStreamDisplayHeight << " ! "
+        << "nvvideoconvert ! "
+        << "video/x-raw,format=BGRx,width=" << app_config::kDeepStreamDisplayWidth
+        << ",height=" << app_config::kDeepStreamDisplayHeight << " ! "
         << "videoconvert ! "
-        << "video/x-raw,format=BGR ! "
+        << "video/x-raw,format=BGR,width=" << app_config::kDeepStreamDisplayWidth
+        << ",height=" << app_config::kDeepStreamDisplayHeight << " ! "
         << "appsink name=appsink emit-signals=false sync=false max-buffers=1 drop=true";
 
     {
@@ -285,6 +339,10 @@ DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
              << ",height=" << height << " ! "
              << inferTail.str();
         candidates.push_back({"mjpeg-cpujpeg-nv12", text.str()});
+    }
+
+    if (app_config::kDeepStreamPreferH264Capture && candidates.size() >= 2) {
+        std::rotate(candidates.begin(), candidates.begin() + 1, candidates.begin() + 2);
     }
 
     return candidates;
@@ -379,6 +437,8 @@ bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, 
     requestedWidth = width;
     requestedHeight = height;
     requestedFps = fps;
+    sourceWidth = width;
+    sourceHeight = height;
 
     const auto candidates = buildPipelineCandidates(devicePath, width, height, fps);
     for (const PipelineDefinition& definition : candidates) {
@@ -387,6 +447,8 @@ bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, 
         requestedWidth = width;
         requestedHeight = height;
         requestedFps = fps;
+        sourceWidth = width;
+        sourceHeight = height;
 
         if (!createAndStartPipeline(definition)) {
             close();
@@ -487,12 +549,17 @@ bool DeepStreamYolo::read(cv::Mat& frame, bool trackingEnabled)
     gst_sample_unref(sample);
 
     std::vector<Detection> detections;
+    cv::Size sourceFrameSize(sourceWidth > 0 ? sourceWidth : requestedWidth,
+                             sourceHeight > 0 ? sourceHeight : requestedHeight);
     {
         std::lock_guard<std::mutex> lock(detectionsMutex);
         detections = latestDetections;
+        if (latestSourceFrameSize.width > 0 && latestSourceFrameSize.height > 0) {
+            sourceFrameSize = latestSourceFrameSize;
+        }
     }
 
-    processDetections(frame, detections, trackingEnabled);
+    processDetections(frame, detections, sourceFrameSize, trackingEnabled);
     return !frame.empty();
 }
 
@@ -512,9 +579,12 @@ void DeepStreamYolo::close()
     {
         std::lock_guard<std::mutex> lock(detectionsMutex);
         latestDetections.clear();
+        latestSourceFrameSize = cv::Size();
     }
     actualWidth = 0;
     actualHeight = 0;
+    sourceWidth = 0;
+    sourceHeight = 0;
     currentPipelineName.clear();
 }
 
@@ -528,7 +598,10 @@ std::string DeepStreamYolo::statusText() const
     out << " requested "
         << requestedWidth << "x" << requestedHeight << "@" << requestedFps;
     if (actualWidth > 0 && actualHeight > 0) {
-        out << " actual " << actualWidth << "x" << actualHeight << "@" << requestedFps;
+        out << " display " << actualWidth << "x" << actualHeight << "@" << requestedFps;
+    }
+    if (sourceWidth > 0 && sourceHeight > 0) {
+        out << " source " << sourceWidth << "x" << sourceHeight;
     }
     return out.str();
 }
@@ -555,6 +628,8 @@ void DeepStreamYolo::updateDetectionsFromBuffer(GstBuffer* buffer)
     }
 
     std::vector<Detection> parsed;
+    cv::Size parsedSourceSize(sourceWidth > 0 ? sourceWidth : requestedWidth,
+                              sourceHeight > 0 ? sourceHeight : requestedHeight);
     for (NvDsMetaList* frameList = batchMeta->frame_meta_list;
          frameList != nullptr;
          frameList = frameList->next)
@@ -570,6 +645,7 @@ void DeepStreamYolo::updateDetectionsFromBuffer(GstBuffer* buffer)
         const int frameHeight = frameMeta->source_frame_height > 0
             ? static_cast<int>(frameMeta->source_frame_height)
             : requestedHeight;
+        parsedSourceSize = cv::Size(frameWidth, frameHeight);
 
         for (NvDsMetaList* userList = frameMeta->frame_user_meta_list;
              userList != nullptr;
@@ -589,6 +665,7 @@ void DeepStreamYolo::updateDetectionsFromBuffer(GstBuffer* buffer)
 
     std::lock_guard<std::mutex> lock(detectionsMutex);
     latestDetections = std::move(parsed);
+    latestSourceFrameSize = parsedSourceSize;
 }
 
 std::vector<DeepStreamYolo::Detection> DeepStreamYolo::parseTensorMeta(void* tensorMetaPtr,
@@ -697,6 +774,7 @@ std::vector<DeepStreamYolo::Detection> DeepStreamYolo::parseTensorMeta(void* ten
 
 void DeepStreamYolo::processDetections(cv::Mat& frame,
                                        const std::vector<Detection>& detections,
+                                       const cv::Size& sourceFrameSize,
                                        bool trackingEnabled)
 {
     std::vector<Candidate> candidates;
@@ -719,9 +797,14 @@ void DeepStreamYolo::processDetections(cv::Mat& frame,
         }
     }
 
+    const cv::Size displaySize(frame.cols, frame.rows);
+    cv::Point selectedDisplayCenter;
     const cv::Point* selectedCenter = nullptr;
     if (selected >= 0) {
-        selectedCenter = &candidates[selected].detection.center;
+        selectedDisplayCenter = scalePointToDisplay(candidates[selected].detection.center,
+                                                    sourceFrameSize,
+                                                    displaySize);
+        selectedCenter = &selectedDisplayCenter;
     }
 
     for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
@@ -729,8 +812,11 @@ void DeepStreamYolo::processDetections(cv::Mat& frame,
         const bool isSelected = (i == selected);
         const cv::Scalar color = isSelected ? cv::Scalar(0, 255, 0)
                                             : cv::Scalar(0, 0, 255);
+        const cv::Rect displayBox = scaleRectToDisplay(detection.box,
+                                                       sourceFrameSize,
+                                                       displaySize);
 
-        cv::rectangle(frame, detection.box, color, isSelected ? 3 : 2);
+        cv::rectangle(frame, displayBox, color, isSelected ? 3 : 2);
         std::string label = cv::format("%.2f", detection.confidence);
         if (detection.classId >= 0 &&
             detection.classId < static_cast<int>(classes.size()))
@@ -739,7 +825,7 @@ void DeepStreamYolo::processDetections(cv::Mat& frame,
         }
         cv::putText(frame,
                     label,
-                    cv::Point(detection.box.x, std::max(0, detection.box.y - 5)),
+                    cv::Point(displayBox.x, std::max(0, displayBox.y - 5)),
                     cv::FONT_HERSHEY_SIMPLEX,
                     0.8,
                     color,
@@ -748,7 +834,7 @@ void DeepStreamYolo::processDetections(cv::Mat& frame,
 
     if (trackingEnabled && selected >= 0) {
         const Detection& target = candidates[selected].detection;
-        TargetManager::submitCameraTarget(target.center, target.box, frame.size());
+        TargetManager::submitCameraTarget(target.center, target.box, sourceFrameSize);
         lastTargetCenter = target.center;
         haveLastTarget = true;
         lostTargetFrames = 0;
@@ -761,7 +847,7 @@ void DeepStreamYolo::processDetections(cv::Mat& frame,
         }
     }
 
-    drawTrackingOverlay(frame, selectedCenter);
+    drawTrackingOverlay(frame, selectedCenter, sourceFrameSize);
 }
 
 void DeepStreamYolo::loadClasses()
