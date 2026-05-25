@@ -1,6 +1,7 @@
 #include "turret_command.h"
 
 #include "can_work.h"
+#include "latency_monitor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -78,7 +79,13 @@ bool sendPosition(can_work* can, AnglesDeg angles, std::uint8_t control)
         return false;
     }
 
-    can->writeCan(makePositionFrame(angles, control));
+    const can_frame frame = makePositionFrame(angles, control);
+    const latency_monitor::Token latencyToken = latency_monitor::currentCameraToken();
+    if (latencyToken != 0) {
+        can->writeCanTracked(frame, latencyToken);
+    } else {
+        can->writeCan(frame);
+    }
     return true;
 }
 

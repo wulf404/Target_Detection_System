@@ -1,4 +1,5 @@
 #include "can_work.h"
+#include "latency_monitor.h"
 #include "tower_state.h"
 
 #include <cerrno>
@@ -148,6 +149,9 @@ void can_work::run()
 
     {
         std::lock_guard<std::mutex> lock(txMutex);
+        for (const TxEntry& entry : txQueue) {
+            latency_monitor::cancel(entry.latencyToken);
+        }
         txQueue.clear();
     }
     running.store(false);
@@ -156,14 +160,23 @@ void can_work::run()
 //Отправка сообщения
 void can_work::writeCan(const can_frame &frame)
 {
+    writeCanTracked(frame, 0);
+}
+
+void can_work::writeCanTracked(const can_frame &frame, std::uint64_t latencyToken)
+{
     constexpr std::size_t kMaxQueuedFrames = 256;
 
     std::lock_guard<std::mutex> lock(txMutex);
     if (txQueue.size() >= kMaxQueuedFrames) {
+        latency_monitor::cancel(txQueue.front().latencyToken);
         txQueue.pop_front();
         emit appendConsole("[CAN] TX queue overflow, dropped oldest frame");
     }
-    txQueue.push_back(frame);
+    if (latencyToken != 0) {
+        latency_monitor::markControlCompleteAndSendQueued(latencyToken);
+    }
+    txQueue.push_back({frame, latencyToken});
 }
 
 //Запуск интерфейса
@@ -796,15 +809,19 @@ bool can_work::writeCanNow(const can_frame &frame)
 
 void can_work::drainTxQueue()
 {
-    std::deque<can_frame> local;
+    std::deque<TxEntry> local;
     {
         std::lock_guard<std::mutex> lock(txMutex);
         local.swap(txQueue);
     }
 
-    for (const can_frame& frame : local) {
-        if (!writeCanNow(frame)) {
+    for (auto it = local.begin(); it != local.end(); ++it) {
+        if (!writeCanNow(it->frame)) {
+            for (; it != local.end(); ++it) {
+                latency_monitor::cancel(it->latencyToken);
+            }
             break;
         }
+        latency_monitor::finishSend(it->latencyToken);
     }
 }

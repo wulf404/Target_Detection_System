@@ -19,6 +19,7 @@ SOURCES += \
     balancer.cpp \
     camera.cpp \
     can_work.cpp \
+    latency_monitor.cpp \
     main.cpp \
     mainwindow.cpp \
     my_yolo.cpp \
@@ -41,6 +42,7 @@ HEADERS += \
     can_work.h \
     common_constants.h \
     cuda_preprocess.h \
+    latency_monitor.h \
     mainwindow.h \
     my_yolo.h \
     rangefinder_uart.h \

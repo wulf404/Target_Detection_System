@@ -563,7 +563,7 @@ void Camera::run()
             if (do_infer && Yolo)
             {
                 tm_yolo.start();
-                (void)Yolo->run(frame);
+                (void)Yolo->run(frame, tm_read.getTimeMilli());
                 tm_yolo.stop();
                 perf_yolo_runs++;
             }

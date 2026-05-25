@@ -17,6 +17,9 @@ constexpr const char* kYoloEnginePath = "/home/nick/qt/yolo_quadro_weights/quadr
 constexpr const char* kYoloWeightsPath = kYoloEnginePath;
 constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quadro_3000.names";
 
+// Latency console log period: 1 = every inference frame, 5 = every fifth frame.
+constexpr std::uint64_t kLatencyLogEveryNFrames = 1;
+
 constexpr double kCameraFovHDeg = 25.0;
 constexpr double kCameraFovVDeg = 14.5;
 

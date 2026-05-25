@@ -5,6 +5,7 @@
 #include <QRunnable>
 #include <QThreadPool>
 #include <atomic>
+#include <cstdint>
 #include <deque>
 #include <iostream>
 #include <mutex>
@@ -50,6 +51,7 @@ public:
 
     void parceMsg(const can_frame &frame);
     void analysisMsg();
+    void writeCanTracked(const can_frame &frame, std::uint64_t latencyToken);
 
 public slots:
     void setStopFlag(bool _stop);
@@ -63,6 +65,12 @@ signals:
     void startParce(const can_frame &frame);
 
 private:
+    struct TxEntry
+    {
+        can_frame frame{};
+        std::uint64_t latencyToken = 0;
+    };
+
     int mSock;
     std::atomic<bool> isOpen;
     std::atomic<bool> isRecv;
@@ -72,7 +80,7 @@ private:
 
     std::atomic<bool> stop_flag;
     std::mutex txMutex;
-    std::deque<can_frame> txQueue;
+    std::deque<TxEntry> txQueue;
 
     uchar msgID;
     uchar msgDLC;

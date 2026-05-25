@@ -1,6 +1,7 @@
 #include "my_yolo.h"
 #include "auto_tracker.h"
 #include "app_config.h"
+#include "latency_monitor.h"
 #include "target_manager.h"
 
 #include <NvInferPlugin.h>
@@ -494,7 +495,7 @@ void my_yolo::loadClasses(const std::string& namesPath)
     }
 }
 
-yolo_output my_yolo::run(cv::Mat &frame)
+yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
 {
     // PERF timers
     cv::TickMeter tm_total, tm_blob, tm_fwd, tm_decode, tm_nms, tm_scale, tm_drawpack;
@@ -706,6 +707,15 @@ yolo_output my_yolo::run(cv::Mat &frame)
         output.area.push_back(candidate.area);
     }
 
+    tm_drawpack.stop();
+    const double postprocessMs =
+        ms(tm_decode) + ms(tm_nms) + ms(tm_scale) + ms(tm_drawpack);
+    const latency_monitor::Token latencyToken = latency_monitor::beginCameraFrame(
+        captureMs,
+        ms(tm_blob),
+        ms(tm_fwd),
+        postprocessMs);
+
     if (selected >= 0) {
         const TargetCandidate& target = candidates[selected];
         TargetManager::submitCameraTarget(target.center, target.box, frame.size());
@@ -719,9 +729,10 @@ yolo_output my_yolo::run(cv::Mat &frame)
         }
         TargetManager::submitCameraMiss();
     }
+    latency_monitor::finishFrameWithoutSend(latencyToken);
+    latency_monitor::clearCurrentCameraToken();
 
     drawTrackingOverlay(frame, selectedCenter);
-    tm_drawpack.stop();
 
     tm_total.stop();
 

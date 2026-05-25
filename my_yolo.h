@@ -20,7 +20,7 @@ public:
     ~my_yolo();
 
     // frame BGR CV_8UC3, рисование боксов может быть внутри (как сейчас)
-    yolo_output run(cv::Mat &frame);
+    yolo_output run(cv::Mat &frame, double captureMs = 0.0);
 
     // печатать perf раз в N вызовов run()
     void setPerfPrintEvery(int n) { perf_print_every = (n <= 0 ? 1 : n); }
