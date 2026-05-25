@@ -257,6 +257,7 @@ bool DeepStreamYolo::writeInferConfig() const
          << "process-mode=1\n"
          << "network-type=100\n"
          << "network-mode=2\n"
+         << "force-implicit-batch-dim=0\n"
          << "gie-unique-id=1\n"
          << "infer-dims=3;" << app_config::kDeepStreamNetworkInputHeight
          << ";" << app_config::kDeepStreamNetworkInputWidth << "\n"
@@ -277,12 +278,19 @@ DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
                                         int fps) const
 {
     std::vector<PipelineDefinition> candidates;
+    const int muxWidth = app_config::kDeepStreamScaleInMuxToNetworkInput
+        ? app_config::kDeepStreamNetworkInputWidth
+        : width;
+    const int muxHeight = app_config::kDeepStreamScaleInMuxToNetworkInput
+        ? app_config::kDeepStreamNetworkInputHeight
+        : height;
 
     std::ostringstream inferTail;
     inferTail
-        << "queue leaky=2 max-size-buffers=2 ! "
-        << "mux.sink_0 nvstreammux name=mux batch-size=1 width=" << width
-        << " height=" << height << " live-source=1 batched-push-timeout=10000 ! "
+        << "queue leaky=2 max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! "
+        << "mux.sink_0 nvstreammux name=mux batch-size=1 width=" << muxWidth
+        << " height=" << muxHeight
+        << " enable-padding=0 live-source=1 batched-push-timeout=10000 ! "
         << "nvinfer name=primary config-file-path=" << app_config::kDeepStreamInferConfigPath << " ! "
         << "queue leaky=2 max-size-buffers=1 ! "
         << "nvvideoconvert ! "
@@ -303,9 +311,6 @@ DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
              << ",framerate=" << fps << "/1 ! "
              << "jpegparse ! "
              << "nvv4l2decoder mjpeg=1 ! "
-             << "nvvideoconvert ! "
-             << "video/x-raw(memory:NVMM),format=NV12,width=" << width
-             << ",height=" << height << " ! "
              << inferTail.str();
         candidates.push_back({"mjpeg-nvdec-nv12", text.str()});
     }
@@ -317,9 +322,6 @@ DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
              << ",framerate=" << fps << "/1 ! "
              << "h264parse config-interval=-1 ! "
              << "nvv4l2decoder ! "
-             << "nvvideoconvert ! "
-             << "video/x-raw(memory:NVMM),format=NV12,width=" << width
-             << ",height=" << height << " ! "
              << inferTail.str();
         candidates.push_back({"h264-nvdec-nv12", text.str()});
     }
@@ -335,8 +337,7 @@ DeepStreamYolo::buildPipelineCandidates(const std::string& devicePath,
              << "video/x-raw,format=NV12,width=" << width
              << ",height=" << height << " ! "
              << "nvvideoconvert ! "
-             << "video/x-raw(memory:NVMM),format=NV12,width=" << width
-             << ",height=" << height << " ! "
+             << "video/x-raw(memory:NVMM),format=NV12 ! "
              << inferTail.str();
         candidates.push_back({"mjpeg-cpujpeg-nv12", text.str()});
     }
@@ -429,6 +430,8 @@ bool DeepStreamYolo::primePipeline()
 bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, int fps)
 {
     close();
+    fatalError = false;
+    pipelineErrorText.clear();
     if (!writeInferConfig()) {
         return false;
     }
@@ -464,6 +467,9 @@ bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, 
         std::cerr << "[DS][GST] pipeline mode failed before first frame: "
                   << definition.name << std::endl;
         close();
+        if (fatalError) {
+            return false;
+        }
     }
 
     return false;
@@ -472,6 +478,16 @@ bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, 
 bool DeepStreamYolo::isOpened() const
 {
     return pipeline != nullptr && appsink != nullptr;
+}
+
+bool DeepStreamYolo::hasFatalError() const
+{
+    return fatalError;
+}
+
+std::string DeepStreamYolo::lastErrorText() const
+{
+    return pipelineErrorText;
 }
 
 bool DeepStreamYolo::checkBusErrors()
@@ -496,6 +512,18 @@ bool DeepStreamYolo::checkBusErrors()
             std::cerr << "[DS][GST] error: "
                       << (error ? error->message : "unknown") << " debug="
                       << (debug ? debug : "") << std::endl;
+            const std::string errorText = error ? error->message : "unknown";
+            const std::string debugText = debug ? debug : "";
+            pipelineErrorText = errorText + " " + debugText;
+            if (app_config::kDeepStreamStopOnCudaError &&
+                (pipelineErrorText.find("NVDSINFER_CUDA_ERROR") != std::string::npos ||
+                 pipelineErrorText.find("cudaErrorIllegalAddress") != std::string::npos))
+            {
+                fatalError = true;
+                std::cerr << "[DS][FATAL] CUDA/nvinfer context failed. "
+                          << "Rebuild the TensorRT engine on this Jetson Orin NX "
+                          << "and restart the application." << std::endl;
+            }
             if (error) {
                 g_error_free(error);
             }
@@ -639,12 +667,18 @@ void DeepStreamYolo::updateDetectionsFromBuffer(GstBuffer* buffer)
             continue;
         }
 
-        const int frameWidth = frameMeta->source_frame_width > 0
-            ? static_cast<int>(frameMeta->source_frame_width)
-            : requestedWidth;
-        const int frameHeight = frameMeta->source_frame_height > 0
-            ? static_cast<int>(frameMeta->source_frame_height)
-            : requestedHeight;
+        // nvstreammux may expose its scaled surface size here. Tracking,
+        // deadzones and FOV math must stay in physical camera coordinates.
+        const int frameWidth = sourceWidth > 0
+            ? sourceWidth
+            : (frameMeta->source_frame_width > 0
+                ? static_cast<int>(frameMeta->source_frame_width)
+                : requestedWidth);
+        const int frameHeight = sourceHeight > 0
+            ? sourceHeight
+            : (frameMeta->source_frame_height > 0
+                ? static_cast<int>(frameMeta->source_frame_height)
+                : requestedHeight);
         parsedSourceSize = cv::Size(frameWidth, frameHeight);
 
         for (NvDsMetaList* userList = frameMeta->frame_user_meta_list;

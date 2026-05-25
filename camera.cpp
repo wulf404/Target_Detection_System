@@ -388,6 +388,11 @@ bool Camera::openDeepStreamDevice()
                 std::cout << "[CAM][DS] opened OK: " << DeepStream->statusText() << std::endl;
                 return true;
             }
+            if (DeepStream->hasFatalError()) {
+                current_device_path.clear();
+                publishDeviceState(true, "DeepStream CUDA error: rebuild engine and restart");
+                return false;
+            }
         }
 
         current_device_path.clear();
@@ -514,8 +519,28 @@ void Camera::run()
     {
         setStopped(false);
         setStarted(true);
+        const bool deepStreamMode = app_config::kUseDeepStream;
+
+        const auto stopForFatalDeepStreamError = [&]() {
+            if (!deepStreamMode || !DeepStream || !DeepStream->hasFatalError()) {
+                return false;
+            }
+
+            std::cerr << "[CAM][DS][FATAL] pipeline cannot be reopened after a CUDA error: "
+                      << DeepStream->lastErrorText()
+                      << ". Rebuild the TensorRT engine on this Jetson and restart."
+                      << std::endl;
+            publishDeviceState(true, "DeepStream CUDA error: rebuild engine and restart");
+            return true;
+        };
 
         while (!isStopped() && !openDevice()) {
+            if (stopForFatalDeepStreamError()) {
+                closeDevice();
+                setStopped(true);
+                setStarted(false);
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
 
@@ -526,7 +551,6 @@ void Camera::run()
             return;
         }
 
-        const bool deepStreamMode = app_config::kUseDeepStream;
         if (!deepStreamMode && !video.isOpened()) {
             std::cerr << "[CAM] start failed: device not opened" << std::endl;
             setStopped(true);
@@ -587,25 +611,37 @@ void Camera::run()
 
             if (!ok || frame.empty())
             {
+                if (stopForFatalDeepStreamError()) {
+                    break;
+                }
+
                 bad_reads_in_row++;
 
                 if (bad_reads_in_row >= BAD_READS_LIMIT)
                 {
-                    std::cerr << "[CAM][USB][GST] stream lost. Reopening..." << std::endl;
+                    std::cerr << (deepStreamMode
+                        ? "[CAM][DS][GST] pipeline lost. Reopening..."
+                        : "[CAM][USB][GST] stream lost. Reopening...")
+                              << std::endl;
                     closeDevice();
                     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
                     while (!isStopped()) {
                         if (openDevice()) {
-                            std::cerr << "[CAM][USB][GST] reconnected OK\n";
+                            std::cerr << (deepStreamMode
+                                ? "[CAM][DS][GST] reconnected OK\n"
+                                : "[CAM][USB][GST] reconnected OK\n");
                             bad_reads_in_row = 0;
                             t_prev = cv::getTickCount();
+                            break;
+                        }
+                        if (stopForFatalDeepStreamError()) {
                             break;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(300));
                     }
 
-                    if (isStopped()) {
+                    if (isStopped() || stopForFatalDeepStreamError()) {
                         break;
                     }
                     continue;

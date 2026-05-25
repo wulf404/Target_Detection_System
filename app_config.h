@@ -22,7 +22,15 @@ constexpr int kDeepStreamNetworkInputWidth = 1280;
 constexpr int kDeepStreamNetworkInputHeight = 1280;
 constexpr int kDeepStreamDisplayWidth = 1280;
 constexpr int kDeepStreamDisplayHeight = 720;
-constexpr bool kDeepStreamPreferH264Capture = false;
+// HDMI USB Camera advertises H264 3840x2160@60; it is lighter and more stable
+// for the USB/decoder path than MJPEG at this data rate.
+constexpr bool kDeepStreamPreferH264Capture = true;
+// Keep direct-resize semantics, but do the 4K -> network-size conversion in
+// nvstreammux instead of feeding a full 4K surface into nvinfer.
+constexpr bool kDeepStreamScaleInMuxToNetworkInput = true;
+// A CUDA illegal-address failure poisons the process context; reconnecting the
+// camera cannot repair it.
+constexpr bool kDeepStreamStopOnCudaError = true;
 constexpr float kDeepStreamConfThreshold = 0.3f;
 constexpr float kDeepStreamNmsThreshold = 0.5f;
 

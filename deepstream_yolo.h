@@ -28,6 +28,8 @@ public:
     bool isOpened() const;
     bool read(cv::Mat& frame, bool trackingEnabled);
     void close();
+    bool hasFatalError() const;
+    std::string lastErrorText() const;
 
     std::string statusText() const;
 
@@ -84,4 +86,6 @@ private:
     int sourceWidth = 0;
     int sourceHeight = 0;
     std::string currentPipelineName;
+    bool fatalError = false;
+    std::string pipelineErrorText;
 };
