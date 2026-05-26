@@ -240,17 +240,42 @@ DeepStreamYolo::~DeepStreamYolo()
     close();
 }
 
-bool DeepStreamYolo::writeInferConfig() const
+bool DeepStreamYolo::writeInferConfig()
 {
+    std::ifstream onnxFile(app_config::kDeepStreamOnnxPath, std::ios::binary);
+    std::ifstream engineFile(app_config::kDeepStreamEnginePath, std::ios::binary);
+    if (!engineFile && !onnxFile) {
+        pipelineErrorText = std::string("neither engine nor ONNX exists: engine=") +
+            app_config::kDeepStreamEnginePath + " onnx=" + app_config::kDeepStreamOnnxPath;
+        fatalError = true;
+        std::cerr << "[DS][CONFIG][FATAL] " << pipelineErrorText << std::endl;
+        return false;
+    }
+
+    waitingForEngineBuild = !engineFile;
+    std::cout << "[DS][CONFIG] engine=" << app_config::kDeepStreamEnginePath
+              << " input=" << app_config::kDeepStreamNetworkInputWidth
+              << "x" << app_config::kDeepStreamNetworkInputHeight;
+    if (!engineFile) {
+        std::cout << " engine-missing: nvinfer will build it from ONNX="
+                  << app_config::kDeepStreamOnnxPath;
+    } else {
+        std::cout << " engine-present";
+    }
+    std::cout << std::endl;
+
     std::ofstream file(app_config::kDeepStreamInferConfigPath);
     if (!file) {
-        std::cerr << "[DS][CONFIG] cannot write "
-                  << app_config::kDeepStreamInferConfigPath << std::endl;
+        pipelineErrorText = std::string("cannot write infer config: ") +
+            app_config::kDeepStreamInferConfigPath;
+        fatalError = true;
+        std::cerr << "[DS][CONFIG][FATAL] " << pipelineErrorText << std::endl;
         return false;
     }
 
     file << "[property]\n"
          << "gpu-id=0\n"
+         << "onnx-file=" << app_config::kDeepStreamOnnxPath << "\n"
          << "model-engine-file=" << app_config::kDeepStreamEnginePath << "\n"
          << "labelfile-path=" << app_config::kYoloClassesPath << "\n"
          << "batch-size=1\n"
@@ -388,6 +413,7 @@ bool DeepStreamYolo::createAndStartPipeline(const PipelineDefinition& definition
 
     const GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
+        (void)checkBusErrors();
         std::cerr << "[DS][GST] failed to start pipeline" << std::endl;
         close();
         return false;
@@ -402,7 +428,16 @@ bool DeepStreamYolo::primePipeline()
         return false;
     }
 
-    for (int attempt = 0; attempt < 8; ++attempt) {
+    const int startupTimeoutMs = waitingForEngineBuild
+        ? app_config::kDeepStreamEngineBuildStartupTimeoutMs
+        : app_config::kDeepStreamNormalStartupProbeTimeoutMs;
+    const int maxAttempts = std::max(1, startupTimeoutMs / 300);
+    if (waitingForEngineBuild) {
+        std::cout << "[DS][CONFIG] waiting for first TensorRT engine build (up to "
+                  << (startupTimeoutMs / 1000) << " s)" << std::endl;
+    }
+
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
         if (!checkBusErrors()) {
             return false;
         }
@@ -419,6 +454,7 @@ bool DeepStreamYolo::primePipeline()
             actualHeight = GST_VIDEO_INFO_HEIGHT(&videoInfo);
         }
         gst_sample_unref(sample);
+        waitingForEngineBuild = false;
         return true;
     }
 
@@ -432,6 +468,7 @@ bool DeepStreamYolo::open(const std::string& devicePath, int width, int height, 
     close();
     fatalError = false;
     pipelineErrorText.clear();
+    waitingForEngineBuild = false;
     if (!writeInferConfig()) {
         return false;
     }
@@ -515,14 +552,16 @@ bool DeepStreamYolo::checkBusErrors()
             const std::string errorText = error ? error->message : "unknown";
             const std::string debugText = debug ? debug : "";
             pipelineErrorText = errorText + " " + debugText;
-            if (app_config::kDeepStreamStopOnCudaError &&
-                (pipelineErrorText.find("NVDSINFER_CUDA_ERROR") != std::string::npos ||
-                 pipelineErrorText.find("cudaErrorIllegalAddress") != std::string::npos))
+            const bool nvinferFailure =
+                pipelineErrorText.find("GstNvInfer:primary") != std::string::npos ||
+                pipelineErrorText.find("NVDSINFER") != std::string::npos ||
+                pipelineErrorText.find("cudaErrorIllegalAddress") != std::string::npos;
+            if (app_config::kDeepStreamStopOnNvinferError && nvinferFailure)
             {
                 fatalError = true;
-                std::cerr << "[DS][FATAL] CUDA/nvinfer context failed. "
-                          << "Rebuild the TensorRT engine on this Jetson Orin NX "
-                          << "and restart the application." << std::endl;
+                std::cerr << "[DS][FATAL] nvinfer failed; switching camera modes "
+                          << "cannot recover this pipeline. Check the compiled "
+                          << "engine/input configuration and restart." << std::endl;
             }
             if (error) {
                 g_error_free(error);

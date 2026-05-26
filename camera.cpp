@@ -390,7 +390,7 @@ bool Camera::openDeepStreamDevice()
             }
             if (DeepStream->hasFatalError()) {
                 current_device_path.clear();
-                publishDeviceState(true, "DeepStream CUDA error: rebuild engine and restart");
+                publishDeviceState(true, "DeepStream nvinfer error: check engine and restart");
                 return false;
             }
         }
@@ -521,21 +521,21 @@ void Camera::run()
         setStarted(true);
         const bool deepStreamMode = app_config::kUseDeepStream;
 
-        const auto stopForFatalDeepStreamError = [&]() {
+        const auto stopForFatalDeepStreamFailure = [&]() {
             if (!deepStreamMode || !DeepStream || !DeepStream->hasFatalError()) {
                 return false;
             }
 
-            std::cerr << "[CAM][DS][FATAL] pipeline cannot be reopened after a CUDA error: "
+            std::cerr << "[CAM][DS][FATAL] pipeline cannot be reopened after an nvinfer failure: "
                       << DeepStream->lastErrorText()
-                      << ". Rebuild the TensorRT engine on this Jetson and restart."
+                      << ". Check the 1280 engine/ONNX configuration and restart."
                       << std::endl;
-            publishDeviceState(true, "DeepStream CUDA error: rebuild engine and restart");
+            publishDeviceState(true, "DeepStream nvinfer error: check engine and restart");
             return true;
         };
 
         while (!isStopped() && !openDevice()) {
-            if (stopForFatalDeepStreamError()) {
+            if (stopForFatalDeepStreamFailure()) {
                 closeDevice();
                 setStopped(true);
                 setStarted(false);
@@ -611,7 +611,7 @@ void Camera::run()
 
             if (!ok || frame.empty())
             {
-                if (stopForFatalDeepStreamError()) {
+                if (stopForFatalDeepStreamFailure()) {
                     break;
                 }
 
@@ -635,13 +635,13 @@ void Camera::run()
                             t_prev = cv::getTickCount();
                             break;
                         }
-                        if (stopForFatalDeepStreamError()) {
+                        if (stopForFatalDeepStreamFailure()) {
                             break;
                         }
                         std::this_thread::sleep_for(std::chrono::milliseconds(300));
                     }
 
-                    if (isStopped() || stopForFatalDeepStreamError()) {
+                    if (isStopped() || stopForFatalDeepStreamFailure()) {
                         break;
                     }
                     continue;

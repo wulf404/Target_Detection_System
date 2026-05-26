@@ -16,7 +16,10 @@ constexpr const char* kYoloWeightsPath = "/home/nick/qt/yolo_quadro_weights/quad
 constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quadro_3000.names";
 
 constexpr bool kUseDeepStream = true;
-constexpr const char* kDeepStreamEnginePath = "/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine";
+// DeepStream owns a target-built engine file. Keep it local to the Jetson:
+// when it is absent, nvinfer builds it from this ONNX on that device.
+constexpr const char* kDeepStreamOnnxPath = "/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx";
+constexpr const char* kDeepStreamEnginePath = "/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16_ds_jp621_orin_nx.engine";
 constexpr const char* kDeepStreamInferConfigPath = "/tmp/target_detection_system_nvinfer.txt";
 constexpr int kDeepStreamNetworkInputWidth = 1280;
 constexpr int kDeepStreamNetworkInputHeight = 1280;
@@ -28,9 +31,11 @@ constexpr bool kDeepStreamPreferH264Capture = true;
 // Keep direct-resize semantics, but do the 4K -> network-size conversion in
 // nvstreammux instead of feeding a full 4K surface into nvinfer.
 constexpr bool kDeepStreamScaleInMuxToNetworkInput = true;
-// A CUDA illegal-address failure poisons the process context; reconnecting the
-// camera cannot repair it.
-constexpr bool kDeepStreamStopOnCudaError = true;
+// Invalid nvinfer configuration and CUDA failures are not repaired by
+// reconnecting the camera or switching its capture format.
+constexpr bool kDeepStreamStopOnNvinferError = true;
+constexpr int kDeepStreamNormalStartupProbeTimeoutMs = 2400;
+constexpr int kDeepStreamEngineBuildStartupTimeoutMs = 600000;
 constexpr float kDeepStreamConfThreshold = 0.3f;
 constexpr float kDeepStreamNmsThreshold = 0.5f;
 

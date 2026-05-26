@@ -49,7 +49,7 @@ private:
 
     static GstPadProbeReturn tensorProbe(GstPad* pad, GstPadProbeInfo* info, gpointer userData);
 
-    bool writeInferConfig() const;
+    bool writeInferConfig();
     std::vector<PipelineDefinition> buildPipelineCandidates(const std::string& devicePath,
                                                             int width,
                                                             int height,
@@ -88,4 +88,5 @@ private:
     std::string currentPipelineName;
     bool fatalError = false;
     std::string pipelineErrorText;
+    bool waitingForEngineBuild = false;
 };
