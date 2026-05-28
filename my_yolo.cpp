@@ -172,6 +172,77 @@ double targetScore(const TargetCandidate& candidate,
     return score;
 }
 
+cv::Rect clampRectToFrame(const cv::Rect& rect, const cv::Size& frameSize)
+{
+    return rect & cv::Rect(0, 0, frameSize.width, frameSize.height);
+}
+
+cv::Rect centeredAspectRect(const cv::Point2d& center,
+                            double width,
+                            double height,
+                            const cv::Size& frameSize)
+{
+    if (frameSize.width <= 0 || frameSize.height <= 0) {
+        return cv::Rect();
+    }
+
+    const double aspect = static_cast<double>(frameSize.width) /
+                          static_cast<double>(frameSize.height);
+    width = std::max(2.0, width);
+    height = std::max(2.0, height);
+
+    if ((width / height) < aspect) {
+        width = height * aspect;
+    } else {
+        height = width / aspect;
+    }
+
+    width = std::min(width, static_cast<double>(frameSize.width));
+    height = std::min(height, static_cast<double>(frameSize.height));
+
+    int x = cvRound(center.x - width * 0.5);
+    int y = cvRound(center.y - height * 0.5);
+    int w = cvRound(width);
+    int h = cvRound(height);
+
+    x = std::clamp(x, 0, std::max(0, frameSize.width - w));
+    y = std::clamp(y, 0, std::max(0, frameSize.height - h));
+
+    return clampRectToFrame(cv::Rect(x, y, w, h), frameSize);
+}
+
+cv::Rect dynamicRoiForTarget(const cv::Rect& targetBox,
+                             const cv::Size& frameSize,
+                             int lostFrames)
+{
+    if (targetBox.area() <= 0 || frameSize.width <= 0 || frameSize.height <= 0) {
+        return cv::Rect(0, 0, frameSize.width, frameSize.height);
+    }
+
+    const double lostScale = std::pow(app_config::kYoloRoiLostExpansion,
+                                      std::max(0, lostFrames));
+    const double minWidth = static_cast<double>(frameSize.width) *
+                            app_config::kYoloRoiMinWidthRatio;
+    const double minHeight = static_cast<double>(frameSize.height) *
+                             app_config::kYoloRoiMinHeightRatio;
+    const double width = std::max(static_cast<double>(targetBox.width) *
+                                  app_config::kYoloRoiBoxScale,
+                                  minWidth) * lostScale;
+    const double height = std::max(static_cast<double>(targetBox.height) *
+                                   app_config::kYoloRoiBoxScale,
+                                   minHeight) * lostScale;
+    const cv::Point2d center(targetBox.x + targetBox.width * 0.5,
+                             targetBox.y + targetBox.height * 0.5);
+    return centeredAspectRect(center, width, height, frameSize);
+}
+
+bool isFullFrameRoi(const cv::Rect& roi, const cv::Size& frameSize)
+{
+    return roi.x == 0 && roi.y == 0 &&
+           roi.width == frameSize.width &&
+           roi.height == frameSize.height;
+}
+
 } // namespace
 
 void my_yolo::TrtLogger::log(Severity severity, const char* msg) noexcept
@@ -513,6 +584,35 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     CV_Assert(!frame.empty());
     CV_Assert(frame.type() == CV_8UC3);
 
+    const cv::Rect fullFrameRoi(0, 0, frame.cols, frame.rows);
+    cv::Rect inferenceRoi = fullFrameRoi;
+    const bool periodicFullScan =
+        app_config::kYoloRoiFullScanPeriodFrames > 0 &&
+        roi_frames_since_full_scan >= app_config::kYoloRoiFullScanPeriodFrames;
+    const bool canUseDynamicRoi =
+        app_config::kYoloDynamicRoiEnabled &&
+        have_last_target &&
+        last_target_box.area() > 0 &&
+        !periodicFullScan &&
+        lost_target_frames <= app_config::kYoloRoiMaxLostFramesBeforeSearch;
+
+    if (canUseDynamicRoi) {
+        inferenceRoi = dynamicRoiForTarget(last_target_box, frame.size(), lost_target_frames);
+        if (inferenceRoi.area() <= 0) {
+            inferenceRoi = fullFrameRoi;
+        }
+    }
+
+    inferenceRoi = clampRectToFrame(inferenceRoi, frame.size());
+    if (inferenceRoi.area() <= 0) {
+        inferenceRoi = fullFrameRoi;
+    }
+    const bool roiMode = !isFullFrameRoi(inferenceRoi, frame.size());
+    const char* pipelineMode = roiMode
+        ? (lost_target_frames > 0 ? "LOST_ROI" : "TRACK_ROI")
+        : "SEARCH_FULL";
+    const cv::Mat inferenceFrame = roiMode ? frame(inferenceRoi) : frame;
+
     // ============================
     // 2.1 blob (preprocess)
     // ============================
@@ -520,7 +620,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     bool inputReady = false;
 #if ENABLE_CUDA_PREPROCESS
     try {
-        gpu_frame_u8.upload(frame, gpu_stream);
+        gpu_frame_u8.upload(inferenceFrame, gpu_stream);
 
         cv::cuda::resize(gpu_frame_u8, gpu_resized_u8,
                          cv::Size(yolo_width, yolo_height),
@@ -542,7 +642,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         if (!ok) throw std::runtime_error("cuda_preprocess_bgr_to_nchw failed");
         inputReady = true;
     } catch (...) {
-        cv::Mat blob = cv::dnn::blobFromImage(frame, scale,
+        cv::Mat blob = cv::dnn::blobFromImage(inferenceFrame, scale,
                                               cv::Size(yolo_width, yolo_height),
                                               mean, swapRB, false, CV_32F);
         inputReady = (cudaMemcpyAsync(trtInputDevice,
@@ -553,7 +653,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
                       cudaStreamSynchronize(trtStream) == cudaSuccess);
     }
 #else
-    cv::Mat blob = cv::dnn::blobFromImage(frame, scale,
+    cv::Mat blob = cv::dnn::blobFromImage(inferenceFrame, scale,
                                           cv::Size(yolo_width, yolo_height),
                                           mean, swapRB, false, CV_32F);
     inputReady = (cudaMemcpyAsync(trtInputDevice,
@@ -635,8 +735,8 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     // 2.5 scale (map to original frame)
     // ============================
     tm_scale.start();
-    const float sx = (float)frame.cols / (float)yolo_width;
-    const float sy = (float)frame.rows / (float)yolo_height;
+    const float sx = (float)inferenceRoi.width / (float)yolo_width;
+    const float sy = (float)inferenceRoi.height / (float)yolo_height;
     tm_scale.stop();
 
     // ============================
@@ -650,8 +750,8 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     for (int idx : keep_idx)
     {
         cv::Rect b = boxes[idx];
-        b.x = (int)std::round(b.x * sx);
-        b.y = (int)std::round(b.y * sy);
+        b.x = inferenceRoi.x + (int)std::round(b.x * sx);
+        b.y = inferenceRoi.y + (int)std::round(b.y * sy);
         b.width  = (int)std::round(b.width  * sx);
         b.height = (int)std::round(b.height * sy);
 
@@ -682,6 +782,24 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     const cv::Point* selectedCenter = nullptr;
     if (selected >= 0) {
         selectedCenter = &candidates[selected].center;
+    }
+
+    if (app_config::kYoloDynamicRoiEnabled &&
+        app_config::kYoloDynamicRoiDrawOverlay &&
+        roiMode)
+    {
+        const cv::Scalar roiColor = lost_target_frames > 0
+            ? cv::Scalar(0, 170, 255)
+            : cv::Scalar(255, 180, 0);
+        cv::rectangle(frame, inferenceRoi, roiColor, 2, cv::LINE_AA);
+        cv::putText(frame,
+                    pipelineMode,
+                    cv::Point(inferenceRoi.x + 8, std::max(24, inferenceRoi.y + 28)),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    roiColor,
+                    2,
+                    cv::LINE_AA);
     }
 
     for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
@@ -721,14 +839,27 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         TargetManager::submitCameraTarget(target.center, target.box, frame.size());
 
         last_target_center = target.center;
+        last_target_box = target.box;
         have_last_target = true;
         lost_target_frames = 0;
+        if (roiMode) {
+            ++roi_frames_since_full_scan;
+        } else {
+            roi_frames_since_full_scan = 0;
+        }
     } else {
         if (have_last_target && ++lost_target_frames > TARGET_MEMORY_FRAMES) {
             have_last_target = false;
+            last_target_box = cv::Rect();
+            roi_frames_since_full_scan = 0;
+        } else if (roiMode) {
+            ++roi_frames_since_full_scan;
+        } else {
+            roi_frames_since_full_scan = 0;
         }
         TargetManager::submitCameraMiss();
     }
+    last_inference_roi = inferenceRoi;
     latency_monitor::finishFrameWithoutSend(latencyToken);
     latency_monitor::clearCurrentCameraToken();
 
@@ -744,6 +875,17 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     if (frame_counter % perf_print_every == 0)
     {
         const double div = (double)perf_divisor;
+
+        if (app_config::kYoloDynamicRoiEnabled) {
+            std::cerr << "[YOLO PIPE] "
+                      << "mode=" << pipelineMode
+                      << " roi=" << inferenceRoi.x << "," << inferenceRoi.y
+                      << " " << inferenceRoi.width << "x" << inferenceRoi.height
+                      << " lost=" << lost_target_frames
+                      << " kept=" << kept
+                      << " selected=" << (selected >= 0 ? 1 : 0)
+                      << std::endl;
+        }
 
 //        std::cerr
 //            << "[PERF YOLO] "

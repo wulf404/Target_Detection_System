@@ -20,6 +20,17 @@ constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quad
 // Latency console log period: 1 = every inference frame, 5 = every fifth frame.
 constexpr std::uint64_t kLatencyLogEveryNFrames = 1;
 
+// Dynamic YOLO pipeline over a 4K input frame:
+// SEARCH = full frame, TRACK = ROI around the last target, LOST = expanding ROI.
+constexpr bool kYoloDynamicRoiEnabled = true;
+constexpr bool kYoloDynamicRoiDrawOverlay = true;
+constexpr double kYoloRoiBoxScale = 4.0;
+constexpr double kYoloRoiLostExpansion = 1.35;
+constexpr double kYoloRoiMinWidthRatio = 0.25;
+constexpr double kYoloRoiMinHeightRatio = 0.25;
+constexpr int kYoloRoiFullScanPeriodFrames = 45;
+constexpr int kYoloRoiMaxLostFramesBeforeSearch = 8;
+
 constexpr double kCameraFovHDeg = 25.0;
 constexpr double kCameraFovVDeg = 14.5;
 

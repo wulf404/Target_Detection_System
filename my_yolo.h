@@ -98,8 +98,11 @@ private:
     int perf_divisor = 1; // NEW
 
     cv::Point last_target_center;
+    cv::Rect last_target_box;
+    cv::Rect last_inference_roi;
     bool have_last_target = false;
     int lost_target_frames = 0;
+    int roi_frames_since_full_scan = 0;
 
     void loadClasses(const std::string& namesPath);
     void initTensorRt();

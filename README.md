@@ -28,6 +28,9 @@ CAN telemetry -> can_work -> TurretState / UI/status
 | `kYoloEnginePath` | TensorRT engine YOLO. Сейчас `/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine`. |
 | `kYoloOnnxPath` | Старый ONNX путь, оставлен как справка: `/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx`. |
 | `kYoloClassesPath` | Файл классов YOLO. |
+| `kYoloDynamicRoiEnabled` | Динамический pipeline YOLO: полный кадр при поиске, ROI вокруг цели при сопровождении. |
+| `kYoloRoiBoxScale`, `kYoloRoiLostExpansion` | Размер ROI вокруг bbox и расширение ROI после потери цели. |
+| `kYoloRoiFullScanPeriodFrames` | Как часто в TRACK-режиме принудительно проверять весь 4K кадр. |
 | `kCameraFovHDeg`, `kCameraFovVDeg` | Горизонтальный и вертикальный угол камеры. |
 
 В обычной работе этого достаточно. Служебные параметры тоже лежат в `app_config.h`,
@@ -115,6 +118,22 @@ CAN telemetry -> can_work -> TurretState / UI/status
 `requested 3840x2160@60 actual 3840x2160@60`. Если поток пропал после
 выдергивания USB-камеры, устройство закрывается и попытки открыть его снова
 продолжаются до восстановления, без перезапуска приложения.
+
+## Динамический YOLO Pipeline
+
+В основной TensorRT-ветке используется `1280` engine даже при входной камере 4K.
+Режимы выбираются автоматически:
+
+```text
+SEARCH_FULL -> полный кадр 4K, direct resize в 1280x1280
+TRACK_ROI   -> crop вокруг последнего bbox, direct resize crop в 1280x1280
+LOST_ROI    -> расширяющийся crop после краткой потери цели
+```
+
+При сопровождении это уменьшает стоимость загрузки/resize входа и повышает
+детализацию цели внутри входа сети, не меняя `TargetManager`, `AutoTracker`,
+CAN/UART и формат команд. Чтобы не залипать на старом участке, через
+`kYoloRoiFullScanPeriodFrames` выполняется полный скан кадра.
 
 ## Сборка
 
