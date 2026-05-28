@@ -12,6 +12,12 @@ constexpr const char* kCameraPreferredNameContains = "HDMI USB Camera";
 constexpr const char* kCameraPreferredVid = "32e4";
 constexpr const char* kCameraPreferredPid = "3415";
 
+// Camera processing mode:
+// true  = capture thread keeps only the newest frame while YOLO/control work in parallel.
+// false = old sequential capture -> YOLO -> UI pipeline.
+constexpr bool kCameraLatestFramePipelineEnabled = true;
+constexpr int kCameraFrameWaitTimeoutMs = 250;
+
 constexpr const char* kYoloOnnxPath = "/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx";
 constexpr const char* kYoloEnginePath = "/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine";
 constexpr const char* kYoloWeightsPath = kYoloEnginePath;

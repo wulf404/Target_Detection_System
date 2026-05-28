@@ -25,6 +25,8 @@ CAN telemetry -> can_work -> TurretState / UI/status
 | Параметр | Назначение |
 | --- | --- |
 | `kCameraRequestedWidth` | Желаемая входная ширина камеры. Сейчас `3840`, то есть 4K. Менять нужно здесь, а не в `camera.h`. |
+| `kCameraLatestFramePipelineEnabled` | Параллельный latest-frame режим: поток захвата хранит только самый свежий кадр, а YOLO/управление/UI работают параллельно. |
+| `kCameraFrameWaitTimeoutMs` | Сколько ждать новый кадр в latest-frame режиме перед проверкой stop/reconnect состояния. |
 | `kYoloEnginePath` | TensorRT engine YOLO. Сейчас `/home/nick/qt/yolo_quadro_weights/quadron_1280_fp16.engine`. |
 | `kYoloOnnxPath` | Старый ONNX путь, оставлен как справка: `/home/nick/qt/yolo_quadro_weights/quadron_1280.onnx`. |
 | `kYoloClassesPath` | Файл классов YOLO. |
@@ -118,6 +120,12 @@ CAN telemetry -> can_work -> TurretState / UI/status
 `requested 3840x2160@60 actual 3840x2160@60`. Если поток пропал после
 выдергивания USB-камеры, устройство закрывается и попытки открыть его снова
 продолжаются до восстановления, без перезапуска приложения.
+
+По умолчанию включен latest-frame режим. Камера читается отдельным потоком,
+который заменяет старый кадр новым, не накапливая очередь. Если YOLO не успел
+обработать все 60 кадров, старые кадры выбрасываются, зато управление всегда
+работает по самому свежему изображению. В `[PERF CAM]` и на кадре поле `drop`
+показывает, сколько кадров было пропущено ради минимальной задержки.
 
 ## Динамический YOLO Pipeline
 

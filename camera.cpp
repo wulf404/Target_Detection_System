@@ -433,6 +433,8 @@ bool Camera::openDevice()
 
 void Camera::closeDevice()
 {
+    stopCaptureThread();
+
     if (video.isOpened()) {
         video.release();
         std::cout << "[CAM] device closed" << std::endl;
@@ -441,7 +443,121 @@ void Camera::closeDevice()
     current_device_path.clear();
 }
 
-void Camera::run()
+void Camera::Stop()
+{
+    TaskRunner::Stop();
+    capture_running.store(false);
+    latest_frame_cv.notify_all();
+}
+
+void Camera::startCaptureThread()
+{
+    stopCaptureThread();
+
+    {
+        std::lock_guard<std::mutex> lock(latest_frame_mutex);
+        latest_frame.release();
+        latest_capture_ms = 0.0;
+        latest_sequence = 0;
+    }
+
+    capture_failed.store(false);
+    capture_running.store(true);
+
+    capture_thread = std::thread([this]() {
+        int bad_reads_in_row = 0;
+        constexpr int kBadReadsLimit = 5;
+
+        while (capture_running.load() && !isStopped()) {
+            cv::TickMeter tm_read;
+            cv::Mat frame;
+            bool ok = false;
+
+            try {
+                tm_read.start();
+                ok = video.read(frame);
+                tm_read.stop();
+            } catch (const cv::Exception& e) {
+                tm_read.stop();
+                std::cerr << "[CAM][CAPTURE][OpenCV] " << e.what() << std::endl;
+                ok = false;
+            } catch (const std::exception& e) {
+                tm_read.stop();
+                std::cerr << "[CAM][CAPTURE][std] " << e.what() << std::endl;
+                ok = false;
+            }
+
+            if (!ok || frame.empty()) {
+                ++bad_reads_in_row;
+                if (bad_reads_in_row >= kBadReadsLimit) {
+                    capture_failed.store(true);
+                    capture_running.store(false);
+                    latest_frame_cv.notify_all();
+                    break;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            bad_reads_in_row = 0;
+
+            if (frame.channels() == 4) {
+                cv::cvtColor(frame, frame, cv::COLOR_BGRA2BGR);
+            } else if (frame.channels() == 1) {
+                cv::cvtColor(frame, frame, cv::COLOR_GRAY2BGR);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(latest_frame_mutex);
+                latest_frame = std::move(frame);
+                latest_capture_ms = tm_read.getTimeMilli();
+                ++latest_sequence;
+            }
+            latest_frame_cv.notify_one();
+        }
+    });
+}
+
+void Camera::stopCaptureThread()
+{
+    capture_running.store(false);
+    latest_frame_cv.notify_all();
+
+    if (capture_thread.joinable()) {
+        capture_thread.join();
+    }
+
+    capture_failed.store(false);
+}
+
+bool Camera::takeLatestFrame(cv::Mat& frame,
+                             double& captureMs,
+                             std::uint64_t& sequence,
+                             std::uint64_t lastSequence,
+                             int timeoutMs)
+{
+    std::unique_lock<std::mutex> lock(latest_frame_mutex);
+    const bool ready = latest_frame_cv.wait_for(
+        lock,
+        std::chrono::milliseconds(std::max(1, timeoutMs)),
+        [this, lastSequence]() {
+            return isStopped() ||
+                   capture_failed.load() ||
+                   latest_sequence != lastSequence;
+        });
+
+    if (!ready || isStopped() || latest_sequence == lastSequence || latest_frame.empty()) {
+        return false;
+    }
+
+    frame = latest_frame;
+    captureMs = latest_capture_ms;
+    sequence = latest_sequence;
+    return true;
+}
+
+void Camera::runSequentialPipeline()
 {
     try
     {
@@ -651,9 +767,215 @@ void Camera::run()
     setStarted(false);
 }
 
+void Camera::runLatestFramePipeline()
+{
+    try
+    {
+        setStopped(false);
+        setStarted(true);
+
+        while (!isStopped())
+        {
+            while (!isStopped() && !openDevice()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            }
+
+            if (isStopped()) {
+                break;
+            }
+
+            if (!video.isOpened()) {
+                std::cerr << "[CAM] start failed: device not opened" << std::endl;
+                break;
+            }
+
+            if (Yolo) {
+                Yolo->setPerfDivisor(infer_every_n);
+            }
+
+            startCaptureThread();
+            std::cout << "[CAM][PIPE] latest-frame pipeline enabled" << std::endl;
+
+            const cv::Size out_size(1280, 720);
+            const int perf_every = 60;
+
+            double sum_wait = 0.0;
+            double sum_read = 0.0;
+            double sum_yolo = 0.0;
+            double sum_vis  = 0.0;
+            double sum_emit = 0.0;
+
+            int perf_frames = 0;
+            int perf_yolo_runs = 0;
+            std::uint64_t perf_dropped_frames = 0;
+
+            double fps_ema = 0.0;
+            const double fps_alpha = 0.15;
+            int64 t_prev = cv::getTickCount();
+
+            int frame_id = 0;
+            std::uint64_t last_sequence = 0;
+
+            while (!isStopped() && !capture_failed.load())
+            {
+                cv::TickMeter tm_wait, tm_yolo, tm_vis, tm_emit;
+                cv::Mat frame;
+                double captureMs = 0.0;
+                std::uint64_t sequence = 0;
+
+                tm_wait.start();
+                const bool gotFrame = takeLatestFrame(
+                    frame,
+                    captureMs,
+                    sequence,
+                    last_sequence,
+                    app_config::kCameraFrameWaitTimeoutMs);
+                tm_wait.stop();
+
+                if (!gotFrame) {
+                    if (capture_failed.load()) {
+                        break;
+                    }
+                    continue;
+                }
+
+                if (last_sequence > 0 && sequence > last_sequence + 1) {
+                    perf_dropped_frames += sequence - last_sequence - 1;
+                }
+                last_sequence = sequence;
+
+                if (frame.channels() == 4) {
+                    cv::cvtColor(frame, frame, cv::COLOR_BGRA2BGR);
+                } else if (frame.channels() == 1) {
+                    cv::cvtColor(frame, frame, cv::COLOR_GRAY2BGR);
+                }
+
+                int64 t_now = cv::getTickCount();
+                const double dt = static_cast<double>(t_now - t_prev) / cv::getTickFrequency();
+                t_prev = t_now;
+
+                const double fps_inst = (dt > 1e-9) ? (1.0 / dt) : 0.0;
+                if (fps_ema <= 0.0) fps_ema = fps_inst;
+                else fps_ema = fps_alpha * fps_inst + (1.0 - fps_alpha) * fps_ema;
+
+                const bool do_infer = yolo_enabled &&
+                                      (infer_every_n <= 1 || ((frame_id % infer_every_n) == 0));
+
+                if (do_infer && Yolo)
+                {
+                    tm_yolo.start();
+                    (void)Yolo->run(frame, captureMs);
+                    tm_yolo.stop();
+                    perf_yolo_runs++;
+                }
+
+                tm_vis.start();
+
+                cv::resize(frame, frame, out_size);
+
+                std::string infer_text = yolo_enabled
+                    ? ("TRT 1/" + std::to_string(infer_every_n))
+                    : "OFF";
+
+                char buf[240];
+                std::snprintf(buf, sizeof(buf),
+                              "FPS: %.1f  infer: %s  src: USB-GST latest  %dx%d@%d  drop:%llu",
+                              fps_ema,
+                              infer_text.c_str(),
+                              camera_width,
+                              camera_height,
+                              camera_fps,
+                              static_cast<unsigned long long>(perf_dropped_frames));
+
+                cv::putText(frame, buf, cv::Point(15, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+
+                tm_vis.stop();
+
+                tm_emit.start();
+                emit output_frame(frame);
+                tm_emit.stop();
+
+                sum_wait += tm_wait.getTimeMilli();
+                sum_read += captureMs;
+                sum_yolo += tm_yolo.getTimeMilli();
+                sum_vis  += tm_vis.getTimeMilli();
+                sum_emit += tm_emit.getTimeMilli();
+                perf_frames++;
+
+                if (perf_frames >= perf_every)
+                {
+                    const double avg_wait = sum_wait / perf_frames;
+                    const double avg_read = sum_read / perf_frames;
+                    const double avg_yolo = sum_yolo / perf_frames;
+                    const double avg_vis  = sum_vis  / perf_frames;
+                    const double avg_emit = sum_emit / perf_frames;
+
+                    std::cerr
+                        << "[PERF CAM] mode=latest "
+                        << "0.wait=" << avg_wait << "ms, "
+                        << "1.read=" << avg_read << "ms, "
+                        << "2.yolo(avg)=" << avg_yolo << "ms, "
+                        << "3.vis=" << avg_vis << "ms, "
+                        << "4.emit=" << avg_emit << "ms, "
+                        << "infer_runs=" << perf_yolo_runs << "/" << perf_frames
+                        << ", dropped=" << perf_dropped_frames
+                        << "\n";
+
+                    sum_wait = sum_read = sum_yolo = sum_vis = sum_emit = 0.0;
+                    perf_frames = 0;
+                    perf_yolo_runs = 0;
+                    perf_dropped_frames = 0;
+                }
+
+                frame_id++;
+            }
+
+            stopCaptureThread();
+
+            if (!isStopped()) {
+                std::cerr << "[CAM][USB][GST] stream lost. Reopening..." << std::endl;
+                closeDevice();
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            }
+        }
+    }
+    catch (const cv::Exception &e)
+    {
+        std::cerr << "[CAM][EXCEPTION][OpenCV] " << e.what() << std::endl;
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "[CAM][EXCEPTION][std] " << e.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cerr << "[CAM][EXCEPTION] unknown" << std::endl;
+    }
+
+    closeDevice();
+    setStopped(true);
+    setStarted(false);
+}
+
+void Camera::run()
+{
+    if (app_config::kCameraLatestFramePipelineEnabled) {
+        runLatestFramePipeline();
+    } else {
+        runSequentialPipeline();
+    }
+}
+
 void Camera::checkAndReconnect()
 {
     if (isStopped()) {
+        return;
+    }
+
+    if (capture_running.load()) {
+        if (!reconnectTimer) reconnectTimer = new QTimer(this);
+        reconnectTimer->singleShot(2000, this, &Camera::checkAndReconnect);
         return;
     }
 

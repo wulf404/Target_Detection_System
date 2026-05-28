@@ -8,7 +8,12 @@
 #include <opencv2/videoio.hpp>
 
 #include <QString>
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 class QTimer;
@@ -57,7 +62,30 @@ private:
     QString camera_device_description = "not found";
 
 public slots:
+    void Stop() override;
     void checkAndReconnect();
+
+private:
+    void startCaptureThread();
+    void stopCaptureThread();
+    bool takeLatestFrame(cv::Mat& frame,
+                         double& captureMs,
+                         std::uint64_t& sequence,
+                         std::uint64_t lastSequence,
+                         int timeoutMs);
+    void runLatestFramePipeline();
+    void runSequentialPipeline();
+
+private:
+    std::thread capture_thread;
+    std::atomic_bool capture_running{false};
+    std::atomic_bool capture_failed{false};
+
+    std::mutex latest_frame_mutex;
+    std::condition_variable latest_frame_cv;
+    cv::Mat latest_frame;
+    double latest_capture_ms = 0.0;
+    std::uint64_t latest_sequence = 0;
 };
 
 #endif // CAMERA_H
