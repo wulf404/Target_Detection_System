@@ -1,6 +1,5 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
-#include "rangefinder_uart.h"
 #include "app_config.h"
 #include <cstdint>
 #include <atomic>
@@ -24,7 +23,9 @@
 #include <QVBoxLayout>
 #include <QMutexLocker>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #define autostart
 std::atomic<can_work*> g_can{nullptr};
@@ -228,16 +229,23 @@ MainWindow::MainWindow(QWidget *parent)
     for (const auto &can_dev : can_devices)
         ui->cbCan->addItem(can_dev);
 
-    rf = new RangefinderUart("auto", this);
-    connect(rf, &RangefinderUart::distanceReady, this, &MainWindow::showDistance);
-    connect(rf, &RangefinderUart::errorText,     this, &MainWindow::showStatus);
-    connect(rf, &RangefinderUart::deviceStateChanged, this,
-            [this](bool connected, const QString& description) {
-                rangefinderConnected = connected;
-                rangefinderDescription = description;
-                updateSystemStatusPanel();
-            });
-    rf->start();
+    if (app_config::kStereoRangefinderEnabled) {
+        stereoRangefinder = new StereoRangefinder(app_config::kStereoRangefinderPort, this);
+        connect(stereoRangefinder, &StereoRangefinder::distanceReady,
+                this, &MainWindow::showStereoDistance);
+        connect(stereoRangefinder, &StereoRangefinder::errorText,
+                this, &MainWindow::showStatus);
+        connect(stereoRangefinder, &StereoRangefinder::deviceStateChanged, this,
+                [this](bool connected, const QString& description) {
+                    rangefinderConnected = connected;
+                    rangefinderDescription = description;
+                    updateSystemStatusPanel();
+                });
+        stereoRangefinder->start();
+    } else {
+        rangefinderConnected = true;
+        rangefinderDescription = "disabled";
+    }
 
     // УМНЫЙ СТАРТ CAN
     QTimer *canWaiter = new QTimer(this);
@@ -366,6 +374,8 @@ void MainWindow::updateSystemStatusPanel()
     const bool cameraFramesFresh =
         lastVideoFrameMs != 0 && (now - lastVideoFrameMs) <= CAMERA_FRAME_TIMEOUT_MS;
     const bool distanceFresh = targetDistanceFresh();
+    const bool distanceRequired = target.cameraFresh && target.cameraBoxValid;
+    const bool distanceFeedbackOk = !distanceRequired || distanceFresh;
 
     const bool allDevicesDetected =
         canOk &&
@@ -376,7 +386,7 @@ void MainWindow::updateSystemStatusPanel()
         cameraFramesFresh &&
         turret.fresh &&
         target.externalLinkFresh &&
-        distanceFresh;
+        distanceFeedbackOk;
 
     StatusLevel overallLevel = StatusLevel::Bad;
     QString overallText = "DEVICE MISSING";
@@ -460,9 +470,13 @@ void MainWindow::updateSystemStatusPanel()
                   StatusLevel::Bad);
     }
 
-    if (rangefinderConnected && distanceFresh) {
+    if (rangefinderConnected && distanceRequired && distanceFresh) {
         setStatus(statusRangefinder,
                   "OK " + shortDeviceText(rangefinderDescription),
+                  StatusLevel::Ok);
+    } else if (rangefinderConnected && !distanceRequired) {
+        setStatus(statusRangefinder,
+                  "READY " + shortDeviceText(rangefinderDescription),
                   StatusLevel::Ok);
     } else if (rangefinderConnected) {
         setStatus(statusRangefinder,
@@ -475,12 +489,16 @@ void MainWindow::updateSystemStatusPanel()
     }
 
     const int distance = g_target_distance_mm.load(std::memory_order_relaxed);
-    if (distanceFresh && distance >= 0) {
+    if (distanceRequired && distanceFresh && distance >= 0) {
         setStatus(statusDistance,
                   QString("OK %1 mm %2")
                       .arg(distance)
                       .arg(ageText(now, g_target_distance_last_seen_ms.load(std::memory_order_relaxed))),
                   StatusLevel::Ok);
+    } else if (!distanceRequired) {
+        setStatus(statusDistance,
+                  "NO CAMERA TARGET",
+                  StatusLevel::Neutral);
     } else {
         setStatus(statusDistance,
                   "WAIT " + ageText(now, g_target_distance_last_seen_ms.load(std::memory_order_relaxed)),
@@ -547,7 +565,69 @@ void MainWindow::initCan()
 void MainWindow::refreshTrackingHealth()
 {
     TargetManager::refresh();
+    updateStereoRangefinder();
     updateSystemStatusPanel();
+}
+
+void MainWindow::updateStereoRangefinder()
+{
+    if (!stereoRangefinder) {
+        return;
+    }
+
+    const auto target = TargetManager::snapshot();
+    const bool hasCameraBox =
+        target.cameraFresh &&
+        target.cameraBoxValid &&
+        target.cameraBoxW > 0 &&
+        target.cameraBoxH > 0;
+
+    if (!hasCameraBox) {
+        if (stereoRangefinderTargetActive) {
+            stereoRangefinder->clearTarget();
+            stereoRangefinderTargetActive = false;
+            stereoRangefinderLastTargetSeq = 0;
+        }
+        return;
+    }
+
+    int boxX = target.cameraBoxX;
+    int boxY = target.cameraBoxY;
+    int boxW = target.cameraBoxW;
+    int boxH = target.cameraBoxH;
+
+    const int sourceFrameW = app_config::kStereoRangefinderSourceFrameWidth > 0
+        ? app_config::kStereoRangefinderSourceFrameWidth
+        : target.cameraFrameW;
+    const int sourceFrameH = app_config::kStereoRangefinderSourceFrameHeight > 0
+        ? app_config::kStereoRangefinderSourceFrameHeight
+        : target.cameraFrameH;
+    const int stereoFrameW = app_config::kStereoRangefinderFrameWidth;
+    const int stereoFrameH = app_config::kStereoRangefinderFrameHeight;
+
+    if (stereoFrameW > 0 &&
+        stereoFrameH > 0 &&
+        sourceFrameW > 0 &&
+        sourceFrameH > 0)
+    {
+        const double sx = static_cast<double>(stereoFrameW) /
+                          static_cast<double>(sourceFrameW);
+        const double sy = static_cast<double>(stereoFrameH) /
+                          static_cast<double>(sourceFrameH);
+        boxX = static_cast<int>(std::lround(boxX * sx));
+        boxY = static_cast<int>(std::lround(boxY * sy));
+        boxW = std::max(1, static_cast<int>(std::lround(boxW * sx)));
+        boxH = std::max(1, static_cast<int>(std::lround(boxH * sy)));
+
+        boxX = std::clamp(boxX, 0, std::max(0, stereoFrameW - 1));
+        boxY = std::clamp(boxY, 0, std::max(0, stereoFrameH - 1));
+        boxW = std::min(boxW, stereoFrameW - boxX);
+        boxH = std::min(boxH, stereoFrameH - boxY);
+    }
+
+    stereoRangefinder->updateTargetBox(boxX, boxY, boxW, boxH);
+    stereoRangefinderTargetActive = true;
+    stereoRangefinderLastTargetSeq = target.cameraBoxSequence;
 }
 
 void MainWindow::shutdownServices()
@@ -559,9 +639,9 @@ void MainWindow::shutdownServices()
     if (timerX05) timerX05->stop();
     if (timerX0F) timerX0F->stop();
 
-    if (rf) {
-        rf->stopMeasurement();
-        rf->stop();
+    if (stereoRangefinder) {
+        stereoRangefinder->clearTarget();
+        stereoRangefinder->stop();
     }
 
     if (canReaderWriter) {
@@ -654,17 +734,18 @@ void MainWindow::on_pbClear_clicked()
 //Dalnomer (knopky ON u OFF)
 void MainWindow::on_pbTestSend_clicked()
 {
-    if (rf) {
-        rf->startContinuous();
-        MY_CONSOLE_A(">>> RF started");
+    if (stereoRangefinder) {
+        stereoRangefinder->start();
+        stereoRangefinder->requestDistance();
+        MY_CONSOLE_A(">>> SRF started");
     }
 }
 
 void MainWindow::on_pbTestReceive_clicked()
 {
-    if (rf) {
-        rf->stopMeasurement();
-        MY_CONSOLE_A(">>> RF stopped");
+    if (stereoRangefinder) {
+        stereoRangefinder->clearTarget();
+        MY_CONSOLE_A(">>> SRF tracking stopped");
     }
 }
 
@@ -698,6 +779,12 @@ void MainWindow::showDistance(int mm)
         canReaderWriter->writeCan(frame);
     }
     }
+}
+
+void MainWindow::showStereoDistance(double rawDistance, int mm)
+{
+    showDistance(mm);
+    MY_CONSOLE_A(QString("Stereo distance raw = %1").arg(rawDistance, 0, 'f', 3));
 }
 
 void MainWindow::showStatus(const QString& msg)

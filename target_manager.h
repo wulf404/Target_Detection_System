@@ -21,8 +21,17 @@ public:
         bool externalFresh = false;
         bool externalLinkFresh = false;
         bool externalNoTarget = false;
+        bool cameraBoxValid = false;
+        int cameraBoxX = 0;
+        int cameraBoxY = 0;
+        int cameraBoxW = 0;
+        int cameraBoxH = 0;
+        int cameraFrameW = 0;
+        int cameraFrameH = 0;
         int externalAzCentideg = 0;
         int externalElCentideg = 0;
+        uint64_t cameraBoxSequence = 0;
+        uint64_t cameraBoxLastSeenMs = 0;
         uint64_t externalLastSeenMs = 0;
         uint64_t externalLastPacketMs = 0;
     };

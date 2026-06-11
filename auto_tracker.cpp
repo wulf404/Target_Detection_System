@@ -103,7 +103,7 @@ DeadzoneConfig deadzoneForTarget(const cv::Rect& targetBox)
 void AutoTracker::processPixelCenter(const cv::Point& center)
 {
     processPixelCenter(center, cv::Size(app_config::kCameraRequestedWidth,
-                                        app_config::kCameraRequestedWidth * 9 / 16));
+                                        app_config::kCameraRequestedHeight));
 }
 
 void AutoTracker::processPixelCenter(const cv::Point& center, const cv::Size& frameSize)

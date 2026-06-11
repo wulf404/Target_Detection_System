@@ -16,7 +16,7 @@
 #include <cstdint>
 
 #include <balancer.h>
-#include <rangefinder_uart.h>
+#include "stereo_rangefinder.h"
 #include "ui_mainwindow.h"
 
 QT_BEGIN_NAMESPACE
@@ -75,6 +75,7 @@ private slots:
     void on_pbReceive_clicked();
 
     void showDistance(int mm);
+    void showStereoDistance(double rawDistance, int mm);
     void showStatus(const QString& msg);
 
     void sendX10Frame();
@@ -100,8 +101,9 @@ private:
     void shutdownServices();
     void setupSystemStatusPanel();
     void updateSystemStatusPanel();
+    void updateStereoRangefinder();
 
-    RangefinderUart* rf = nullptr;
+    StereoRangefinder* stereoRangefinder = nullptr;
 
     can_work *canReaderWriter = nullptr;
     QThreadPool *threadPool = nullptr;
@@ -136,6 +138,8 @@ private:
     QString rangefinderDescription = "not found";
     QString cameraDeviceDescription = "not found";
     uint64_t lastVideoFrameMs = 0;
+    uint64_t stereoRangefinderLastTargetSeq = 0;
+    bool stereoRangefinderTargetActive = false;
 
     static QImage matToQImageRGB(const cv::Mat &bgr);
 };

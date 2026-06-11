@@ -4,8 +4,9 @@
 
 namespace app_config {
 
-// Main input camera width. Change this value to switch 4K/FullHD/etc.
+// Main input camera resolution. Change these values when the main camera mode changes.
 constexpr int kCameraRequestedWidth = 3840;
+constexpr int kCameraRequestedHeight = 2160;
 // Keep empty for automatic /dev/video0..9 probing.
 constexpr const char* kCameraDevicePathOverride = "";
 constexpr const char* kCameraPreferredNameContains = "HDMI USB Camera";
@@ -33,6 +34,26 @@ constexpr int kYoloRoiMaxLostFramesBeforeSearch = 8;
 
 constexpr double kCameraFovHDeg = 25.0;
 constexpr double kCameraFovVDeg = 14.5;
+
+// Stereo rangefinder connected to Jetson UART.
+constexpr bool kStereoRangefinderEnabled = true;
+constexpr const char* kStereoRangefinderPort = "/dev/ttyTHS1";
+constexpr int kStereoRangefinderBaudRate = 9600;
+constexpr int kStereoRangefinderPollPeriodMs = 100;
+constexpr int kStereoRangefinderReconnectDelayMs = 1000;
+constexpr int kStereoRangefinderBoxRefreshMs = 500;
+constexpr int kStereoRangefinderBoxRefreshMinMovePx = 20;
+constexpr double kStereoRangefinderBoxRefreshMoveRatio = 0.12;
+constexpr double kStereoRangefinderDistanceToMm = 1000.0;
+// BBox coordinates from YOLO are scaled from source frame to the stereo frame.
+// Set source to the main camera coordinate system and frame to the resolution
+// expected by the stereo rangefinder. 0 means "use the actual camera frame".
+constexpr int kStereoRangefinderSourceFrameWidth = kCameraRequestedWidth;
+constexpr int kStereoRangefinderSourceFrameHeight = kCameraRequestedHeight;
+constexpr int kStereoRangefinderFrameWidth = 1920;
+constexpr int kStereoRangefinderFrameHeight = 1080;
+constexpr bool kStereoRangefinderUseRightStream = false;
+constexpr bool kStereoRangefinderSendStopProgramOnClose = false;
 
 // External coordinate protocol uses centidegrees.
 // yaw=-0.01 and pitch=-0.01 are sent as -1, -1: link is alive, but there is no target.

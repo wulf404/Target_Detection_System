@@ -26,6 +26,7 @@ SOURCES += \
     rangefinder_uart.cpp \
     remote_tracker.cpp \
     serial_port_resolver.cpp \
+    stereo_rangefinder.cpp \
     target_manager.cpp \
     tower_state.cpp \
     turret_command.cpp \
@@ -48,6 +49,7 @@ HEADERS += \
     rangefinder_uart.h \
     remote_tracker.h \
     serial_port_resolver.h \
+    stereo_rangefinder.h \
     target_manager.h \
     tower_state.h \
     turret_command.h \

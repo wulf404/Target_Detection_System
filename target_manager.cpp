@@ -30,8 +30,18 @@ struct ExternalTarget
     bool no_target = false;
 };
 
+struct CameraTarget
+{
+    cv::Rect box;
+    cv::Size frame_size;
+    uint64_t sequence = 0;
+    uint64_t last_seen_ms = 0;
+    bool box_valid = false;
+};
+
 std::mutex g_mutex;
 TargetManager::Source g_active_source = TargetManager::Source::None;
+CameraTarget g_camera;
 ExternalTarget g_external;
 
 uint64_t nowMs()
@@ -145,6 +155,14 @@ void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Rect& 
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        const uint64_t now = nowMs();
+        g_camera.box = targetBox & cv::Rect(0, 0, frameSize.width, frameSize.height);
+        g_camera.frame_size = frameSize;
+        g_camera.last_seen_ms = now;
+        g_camera.box_valid = g_camera.box.area() > 0 &&
+                             frameSize.width > 0 &&
+                             frameSize.height > 0;
+        ++g_camera.sequence;
         setActiveSource(Source::Camera, "camera target");
     }
 
@@ -205,6 +223,15 @@ TargetManager::Snapshot TargetManager::snapshot()
     snap.externalFresh = externalFresh(now);
     snap.externalLinkFresh = externalLinkFresh(now);
     snap.externalNoTarget = g_external.no_target && snap.externalLinkFresh && !snap.externalFresh;
+    snap.cameraBoxValid = snap.cameraFresh && g_camera.box_valid;
+    snap.cameraBoxX = g_camera.box.x;
+    snap.cameraBoxY = g_camera.box.y;
+    snap.cameraBoxW = g_camera.box.width;
+    snap.cameraBoxH = g_camera.box.height;
+    snap.cameraFrameW = g_camera.frame_size.width;
+    snap.cameraFrameH = g_camera.frame_size.height;
+    snap.cameraBoxSequence = g_camera.sequence;
+    snap.cameraBoxLastSeenMs = g_camera.last_seen_ms;
     snap.externalLastSeenMs = g_external.last_seen_ms;
     snap.externalLastPacketMs = g_external.last_packet_ms;
     if (snap.cameraFresh) {
