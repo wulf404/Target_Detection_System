@@ -203,6 +203,29 @@ cv::Rect centeredRect(const cv::Point2d& center,
     return clampRectToFrame(cv::Rect(x, y, w, h), frameSize);
 }
 
+cv::Rect centeredVirtualRect(const cv::Point2d& center,
+                             double width,
+                             double height)
+{
+    width = std::max(2.0, width);
+    height = std::max(2.0, height);
+
+    const int w = std::max(1, cvRound(width));
+    const int h = std::max(1, cvRound(height));
+    const int x = cvRound(center.x - w * 0.5);
+    const int y = cvRound(center.y - h * 0.5);
+
+    return cv::Rect(x, y, w, h);
+}
+
+bool sameRect(const cv::Rect& a, const cv::Rect& b)
+{
+    return a.x == b.x &&
+           a.y == b.y &&
+           a.width == b.width &&
+           a.height == b.height;
+}
+
 cv::Rect dynamicRoiForTarget(const cv::Rect& targetBox,
                              const cv::Size& frameSize,
                              int lostFrames,
@@ -216,7 +239,7 @@ cv::Rect dynamicRoiForTarget(const cv::Rect& targetBox,
                              targetBox.y + targetBox.height * 0.5);
     const double trackSide = std::max(2.0, static_cast<double>(networkInputSide));
     if (lostFrames <= 0) {
-        return centeredRect(center, trackSide, trackSide, frameSize);
+        return centeredVirtualRect(center, trackSide, trackSide);
     }
 
     const double minWidth = static_cast<double>(frameSize.width) *
@@ -587,6 +610,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
 
     const cv::Rect fullFrameRoi(0, 0, frame.cols, frame.rows);
     cv::Rect inferenceRoi = fullFrameRoi;
+    cv::Rect visibleInferenceRoi = fullFrameRoi;
     const bool periodicFullScan =
         app_config::kYoloRoiFullScanPeriodFrames > 0 &&
         roi_frames_since_full_scan >= app_config::kYoloRoiFullScanPeriodFrames;
@@ -608,15 +632,43 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         }
     }
 
-    inferenceRoi = clampRectToFrame(inferenceRoi, frame.size());
     if (inferenceRoi.area() <= 0) {
         inferenceRoi = fullFrameRoi;
     }
+    visibleInferenceRoi = clampRectToFrame(inferenceRoi, frame.size());
+    if (visibleInferenceRoi.area() <= 0) {
+        inferenceRoi = fullFrameRoi;
+        visibleInferenceRoi = fullFrameRoi;
+    }
+
     const bool roiMode = !isFullFrameRoi(inferenceRoi, frame.size());
-    const char* pipelineMode = roiMode
+    const bool paddedRoi = roiMode && !sameRect(inferenceRoi, visibleInferenceRoi);
+    const char* pipelineModeBase = roiMode
         ? (lost_target_frames > 0 ? "LOST_ROI" : "TRACK_ROI")
         : "SEARCH_FULL";
-    const cv::Mat inferenceFrame = roiMode ? frame(inferenceRoi) : frame;
+    const std::string pipelineMode = paddedRoi
+        ? std::string(pipelineModeBase) + "_PAD"
+        : std::string(pipelineModeBase);
+
+    cv::Mat inferenceFrame;
+    if (!roiMode) {
+        inferenceFrame = frame;
+    } else if (paddedRoi) {
+        padded_inference_frame.create(inferenceRoi.height, inferenceRoi.width, frame.type());
+        // Raw mean becomes zero after the model normalization, so padding is neutral.
+        padded_inference_frame.setTo(mean);
+
+        const cv::Rect dstRoi(
+            visibleInferenceRoi.x - inferenceRoi.x,
+            visibleInferenceRoi.y - inferenceRoi.y,
+            visibleInferenceRoi.width,
+            visibleInferenceRoi.height
+        );
+        frame(visibleInferenceRoi).copyTo(padded_inference_frame(dstRoi));
+        inferenceFrame = padded_inference_frame;
+    } else {
+        inferenceFrame = frame(visibleInferenceRoi);
+    }
 
     // ============================
     // 2.1 blob (preprocess)
@@ -803,10 +855,11 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         const cv::Scalar roiColor = lost_target_frames > 0
             ? cv::Scalar(0, 170, 255)
             : cv::Scalar(255, 180, 0);
-        cv::rectangle(frame, inferenceRoi, roiColor, 2, cv::LINE_AA);
+        cv::rectangle(frame, visibleInferenceRoi, roiColor, 2, cv::LINE_AA);
         cv::putText(frame,
                     pipelineMode,
-                    cv::Point(inferenceRoi.x + 8, std::max(24, inferenceRoi.y + 28)),
+                    cv::Point(visibleInferenceRoi.x + 8,
+                              std::max(24, visibleInferenceRoi.y + 28)),
                     cv::FONT_HERSHEY_SIMPLEX,
                     0.8,
                     roiColor,
@@ -893,6 +946,9 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
                       << "mode=" << pipelineMode
                       << " roi=" << inferenceRoi.x << "," << inferenceRoi.y
                       << " " << inferenceRoi.width << "x" << inferenceRoi.height
+                      << " visible=" << visibleInferenceRoi.x << "," << visibleInferenceRoi.y
+                      << " " << visibleInferenceRoi.width << "x" << visibleInferenceRoi.height
+                      << " pad=" << (paddedRoi ? 1 : 0)
                       << " lost=" << lost_target_frames
                       << " kept=" << kept
                       << " selected=" << (selected >= 0 ? 1 : 0)

@@ -86,6 +86,7 @@ private:
     yolo_output output;
 
     // GPU preprocess
+    cv::Mat padded_inference_frame;
     cv::cuda::GpuMat gpu_frame_u8;
     cv::cuda::GpuMat gpu_resized_u8;
     cv::cuda::Stream gpu_stream;
