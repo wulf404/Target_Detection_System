@@ -223,11 +223,14 @@ void RangefinderUart::onReadyRead()
 
         if (msgType == 0xFB && msgCode == 0x03) {
             if (dist == 0) {
+               emit measurementStateChanged("NO OBJECT");
                // qDebug() << "[RF] No object";
             } else if (dist == 0xFFFF) {
+                emit measurementStateChanged("OPEN SPACE");
                 //qDebug() << "[RF] Open space";
             } else {
                 int mm = dist * 100;
+                emit measurementStateChanged(QString("DATA %1 mm").arg(mm));
                 emit distanceReady(mm);
             }
         } else {

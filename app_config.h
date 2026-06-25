@@ -41,7 +41,7 @@ constexpr const char* kStereoRangefinderPort = "/dev/ttyTHS1";
 constexpr int kStereoRangefinderBaudRate = 9600;
 constexpr int kStereoRangefinderPollPeriodMs = 100;
 constexpr int kStereoRangefinderReconnectDelayMs = 1000;
-constexpr int kStereoRangefinderBoxRefreshMs = 500;
+constexpr int kStereoRangefinderBoxRefreshMs = 200;
 constexpr int kStereoRangefinderBoxRefreshMinMovePx = 20;
 constexpr double kStereoRangefinderBoxRefreshMoveRatio = 0.12;
 constexpr double kStereoRangefinderDistanceToMm = 1000.0;
@@ -54,6 +54,10 @@ constexpr int kStereoRangefinderFrameWidth = 1920;
 constexpr int kStereoRangefinderFrameHeight = 1080;
 constexpr bool kStereoRangefinderUseRightStream = false;
 constexpr bool kStereoRangefinderSendStopProgramOnClose = false;
+
+// Pulse rangefinder connected through USB-UART. "auto" uses serial_port_resolver.
+constexpr bool kPulseRangefinderEnabled = true;
+constexpr const char* kPulseRangefinderPort = "auto";
 
 // External coordinate protocol uses centidegrees.
 // yaw=-0.01 and pitch=-0.01 are sent as -1, -1: link is alive, but there is no target.

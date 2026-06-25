@@ -18,6 +18,7 @@ public:
 
 signals:
     void distanceReady(int mm); // готовое расстояние
+    void measurementStateChanged(const QString& text);
     void errorText(const QString& text);
     void deviceStateChanged(bool connected, const QString& description);
     void usbDevicesChanged(const QString& summary);

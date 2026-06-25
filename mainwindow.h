@@ -26,6 +26,7 @@ QT_END_NAMESPACE
 class QThread;
 class UartReceiver;
 class QGroupBox;
+class RangefinderUart;
 
 namespace fs = std::experimental::filesystem;
 
@@ -75,6 +76,7 @@ private slots:
     void on_pbReceive_clicked();
 
     void showDistance(int mm);
+    void showPulseDistance(int mm);
     void showStereoDistance(double rawDistance, int mm);
     void showStatus(const QString& msg);
 
@@ -104,10 +106,12 @@ private:
     void updateStereoRangefinder();
 
     StereoRangefinder* stereoRangefinder = nullptr;
+    RangefinderUart* pulseRangefinder = nullptr;
 
     can_work *canReaderWriter = nullptr;
     QThreadPool *threadPool = nullptr;
     QThread *uartThread = nullptr;
+    QThread *pulseRangefinderThread = nullptr;
     UartReceiver *uartReceiver = nullptr;
 
     std::vector<QString> can_devices;
@@ -127,18 +131,29 @@ private:
     QLabel* statusTargetSource = nullptr;
     QLabel* statusYoloTarget = nullptr;
     QLabel* statusExternal = nullptr;
-    QLabel* statusRangefinder = nullptr;
+    QLabel* statusStereoRangefinder = nullptr;
+    QLabel* statusStereoDistance = nullptr;
+    QLabel* statusPulseRangefinder = nullptr;
+    QLabel* statusPulseDistance = nullptr;
     QLabel* statusDistance = nullptr;
     QLabel* statusTurret = nullptr;
 
     bool externalDeviceConnected = false;
-    bool rangefinderConnected = false;
+    bool stereoRangefinderConnected = false;
+    bool pulseRangefinderConnected = false;
     bool cameraDeviceConnected = false;
     QString externalDeviceDescription = "not found";
-    QString rangefinderDescription = "not found";
+    QString stereoRangefinderDescription = "not found";
+    QString pulseRangefinderDescription = "not found";
     QString cameraDeviceDescription = "not found";
     uint64_t lastVideoFrameMs = 0;
     uint64_t stereoRangefinderLastTargetSeq = 0;
+    uint64_t stereoRangefinderLastDistanceMs = 0;
+    uint64_t pulseRangefinderLastPacketMs = 0;
+    uint64_t pulseRangefinderLastDistanceMs = 0;
+    int stereoRangefinderDistanceMm = -1;
+    int pulseRangefinderDistanceMm = -1;
+    QString pulseRangefinderDataState = "no data";
     bool stereoRangefinderTargetActive = false;
 
     static QImage matToQImageRGB(const cv::Mat &bgr);

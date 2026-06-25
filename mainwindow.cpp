@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <QString>
 #include "uart_receiver.h"
+#include "rangefinder_uart.h"
 #include <QThread>
 #include <iostream>
 #include <QFile>
@@ -106,6 +107,11 @@ QString ageText(uint64_t now, uint64_t last)
         return "never";
     }
     return QString("%1 ms ago").arg(now - last);
+}
+
+bool isFreshSince(uint64_t now, uint64_t last, uint64_t timeoutMs)
+{
+    return last != 0 && (now - last) <= timeoutMs;
 }
 
 QString targetSourceText(TargetManager::Source source)
@@ -237,14 +243,55 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::showStatus);
         connect(stereoRangefinder, &StereoRangefinder::deviceStateChanged, this,
                 [this](bool connected, const QString& description) {
-                    rangefinderConnected = connected;
-                    rangefinderDescription = description;
+                    stereoRangefinderConnected = connected;
+                    stereoRangefinderDescription = description;
                     updateSystemStatusPanel();
                 });
         stereoRangefinder->start();
     } else {
-        rangefinderConnected = true;
-        rangefinderDescription = "disabled";
+        stereoRangefinderDescription = "disabled";
+    }
+
+    if (app_config::kPulseRangefinderEnabled) {
+        pulseRangefinder = new RangefinderUart(app_config::kPulseRangefinderPort);
+        pulseRangefinderThread = new QThread(this);
+
+        pulseRangefinder->moveToThread(pulseRangefinderThread);
+        connect(pulseRangefinder, &QObject::destroyed, this, [this]() { pulseRangefinder = nullptr; });
+        connect(pulseRangefinderThread, &QObject::destroyed, this, [this]() { pulseRangefinderThread = nullptr; });
+        connect(pulseRangefinderThread, &QThread::started,
+                pulseRangefinder, &RangefinderUart::start);
+        connect(this, &MainWindow::destroyed,
+                pulseRangefinder, &RangefinderUart::stop, Qt::DirectConnection);
+        connect(this, &MainWindow::destroyed,
+                pulseRangefinderThread, &QThread::quit);
+        connect(pulseRangefinderThread, &QThread::finished,
+                pulseRangefinder, &QObject::deleteLater);
+        connect(pulseRangefinder, &RangefinderUart::distanceReady,
+                this, &MainWindow::showPulseDistance);
+        connect(pulseRangefinder, &RangefinderUart::measurementStateChanged,
+                this, [this](const QString& text) {
+                    pulseRangefinderDataState = text;
+                    pulseRangefinderLastPacketMs = monotonicMs();
+                    updateSystemStatusPanel();
+                });
+        connect(pulseRangefinder, &RangefinderUart::errorText,
+                this, &MainWindow::showStatus);
+        connect(pulseRangefinder, &RangefinderUart::usbDevicesChanged,
+                this, [this](const QString& summary) {
+                    pulseRangefinderDescription = summary;
+                    updateSystemStatusPanel();
+                });
+        connect(pulseRangefinder, &RangefinderUart::deviceStateChanged, this,
+                [this](bool connected, const QString& description) {
+                    pulseRangefinderConnected = connected;
+                    pulseRangefinderDescription = description;
+                    updateSystemStatusPanel();
+                });
+
+        pulseRangefinderThread->start();
+    } else {
+        pulseRangefinderDescription = "disabled";
     }
 
     // УМНЫЙ СТАРТ CAN
@@ -348,8 +395,11 @@ void MainWindow::setupSystemStatusPanel()
     statusTargetSource = addStatusRow(layout, row++, "Источник");
     statusYoloTarget = addStatusRow(layout, row++, "YOLO");
     statusExternal = addStatusRow(layout, row++, "Внешн.");
-    statusRangefinder = addStatusRow(layout, row++, "Дальномер");
-    statusDistance = addStatusRow(layout, row++, "Дистанция");
+    statusStereoRangefinder = addStatusRow(layout, row++, "Stereo RF");
+    statusStereoDistance = addStatusRow(layout, row++, "Stereo dist");
+    statusPulseRangefinder = addStatusRow(layout, row++, "Pulse RF");
+    statusPulseDistance = addStatusRow(layout, row++, "Pulse dist");
+    statusDistance = addStatusRow(layout, row++, "Active dist");
     statusTurret = addStatusRow(layout, row++, "Башня");
 
     if (ui && ui->gridLayout) {
@@ -373,20 +423,35 @@ void MainWindow::updateSystemStatusPanel()
     const bool canOk = g_can.load(std::memory_order_acquire) != nullptr;
     const bool cameraFramesFresh =
         lastVideoFrameMs != 0 && (now - lastVideoFrameMs) <= CAMERA_FRAME_TIMEOUT_MS;
-    const bool distanceFresh = targetDistanceFresh();
+    const bool activeDistanceFresh = targetDistanceFresh();
+    const bool stereoDistanceFresh =
+        isFreshSince(now, stereoRangefinderLastDistanceMs, RANGEFINDER_LOST_TIMEOUT_MS);
+    const bool pulseDataFresh =
+        isFreshSince(now, pulseRangefinderLastPacketMs, RANGEFINDER_LOST_TIMEOUT_MS);
+    const bool pulseDistanceFresh =
+        isFreshSince(now, pulseRangefinderLastDistanceMs, RANGEFINDER_LOST_TIMEOUT_MS);
     const bool distanceRequired = target.cameraFresh && target.cameraBoxValid;
-    const bool distanceFeedbackOk = !distanceRequired || distanceFresh;
+    const bool activeDistanceFeedbackOk = !distanceRequired || activeDistanceFresh;
+    const bool stereoFeedbackOk =
+        !app_config::kStereoRangefinderEnabled || !distanceRequired || stereoDistanceFresh;
+    const bool pulseFeedbackOk =
+        !app_config::kPulseRangefinderEnabled || pulseDataFresh;
+    const bool rangefinderDevicesDetected =
+        (!app_config::kStereoRangefinderEnabled || stereoRangefinderConnected) &&
+        (!app_config::kPulseRangefinderEnabled || pulseRangefinderConnected);
 
     const bool allDevicesDetected =
         canOk &&
         cameraDeviceConnected &&
         externalDeviceConnected &&
-        rangefinderConnected;
+        rangefinderDevicesDetected;
     const bool allFeedbackFresh =
         cameraFramesFresh &&
         turret.fresh &&
         target.externalLinkFresh &&
-        distanceFeedbackOk;
+        activeDistanceFeedbackOk &&
+        stereoFeedbackOk &&
+        pulseFeedbackOk;
 
     StatusLevel overallLevel = StatusLevel::Bad;
     QString overallText = "DEVICE MISSING";
@@ -470,26 +535,81 @@ void MainWindow::updateSystemStatusPanel()
                   StatusLevel::Bad);
     }
 
-    if (rangefinderConnected && distanceRequired && distanceFresh) {
-        setStatus(statusRangefinder,
-                  "OK " + shortDeviceText(rangefinderDescription),
-                  StatusLevel::Ok);
-    } else if (rangefinderConnected && !distanceRequired) {
-        setStatus(statusRangefinder,
-                  "READY " + shortDeviceText(rangefinderDescription),
-                  StatusLevel::Ok);
-    } else if (rangefinderConnected) {
-        setStatus(statusRangefinder,
-                  "STALE " + shortDeviceText(rangefinderDescription),
-                  StatusLevel::Warn);
-    } else {
-        setStatus(statusRangefinder,
-                  "WAIT " + shortDeviceText(rangefinderDescription),
+    if (!app_config::kStereoRangefinderEnabled) {
+        setStatus(statusStereoRangefinder, "DISABLED", StatusLevel::Neutral);
+    } else if (!stereoRangefinderConnected) {
+        setStatus(statusStereoRangefinder,
+                  "WAIT " + shortDeviceText(stereoRangefinderDescription),
                   StatusLevel::Bad);
+    } else if (!distanceRequired) {
+        setStatus(statusStereoRangefinder,
+                  "READY no camera target " + shortDeviceText(stereoRangefinderDescription),
+                  StatusLevel::Ok);
+    } else if (stereoDistanceFresh) {
+        setStatus(statusStereoRangefinder,
+                  "OK " + shortDeviceText(stereoRangefinderDescription),
+                  StatusLevel::Ok);
+    } else {
+        setStatus(statusStereoRangefinder,
+                  "STALE " + shortDeviceText(stereoRangefinderDescription),
+                  StatusLevel::Warn);
+    }
+
+    if (!app_config::kStereoRangefinderEnabled) {
+        setStatus(statusStereoDistance, "DISABLED", StatusLevel::Neutral);
+    } else if (stereoDistanceFresh && stereoRangefinderDistanceMm >= 0) {
+        setStatus(statusStereoDistance,
+                  QString("DATA %1 mm %2")
+                      .arg(stereoRangefinderDistanceMm)
+                      .arg(ageText(now, stereoRangefinderLastDistanceMs)),
+                  StatusLevel::Ok);
+    } else if (!distanceRequired) {
+        setStatus(statusStereoDistance,
+                  "NO CAMERA TARGET",
+                  StatusLevel::Neutral);
+    } else {
+        setStatus(statusStereoDistance,
+                  "WAIT " + ageText(now, stereoRangefinderLastDistanceMs),
+                  StatusLevel::Warn);
+    }
+
+    if (!app_config::kPulseRangefinderEnabled) {
+        setStatus(statusPulseRangefinder, "DISABLED", StatusLevel::Neutral);
+    } else if (!pulseRangefinderConnected) {
+        setStatus(statusPulseRangefinder,
+                  "WAIT " + shortDeviceText(pulseRangefinderDescription),
+                  StatusLevel::Bad);
+    } else if (pulseDataFresh) {
+        setStatus(statusPulseRangefinder,
+                  "OK " + shortDeviceText(pulseRangefinderDescription),
+                  StatusLevel::Ok);
+    } else {
+        setStatus(statusPulseRangefinder,
+                  "STALE data " + shortDeviceText(pulseRangefinderDescription),
+                  StatusLevel::Warn);
+    }
+
+    if (!app_config::kPulseRangefinderEnabled) {
+        setStatus(statusPulseDistance, "DISABLED", StatusLevel::Neutral);
+    } else if (pulseDistanceFresh && pulseRangefinderDistanceMm >= 0) {
+        setStatus(statusPulseDistance,
+                  QString("DATA %1 mm %2")
+                      .arg(pulseRangefinderDistanceMm)
+                      .arg(ageText(now, pulseRangefinderLastDistanceMs)),
+                  StatusLevel::Ok);
+    } else if (pulseDataFresh) {
+        setStatus(statusPulseDistance,
+                  pulseRangefinderDataState + " " +
+                      ageText(now, pulseRangefinderLastPacketMs),
+                  StatusLevel::Neutral);
+    } else {
+        setStatus(statusPulseDistance,
+                  "WAIT " + ageText(now, pulseRangefinderLastPacketMs),
+                  pulseRangefinderConnected ? StatusLevel::Warn : StatusLevel::Bad);
     }
 
     const int distance = g_target_distance_mm.load(std::memory_order_relaxed);
-    if (distanceRequired && distanceFresh && distance >= 0) {
+    if (distanceRequired && activeDistanceFresh && distance >= 0) {
         setStatus(statusDistance,
                   QString("OK %1 mm %2")
                       .arg(distance)
@@ -644,6 +764,14 @@ void MainWindow::shutdownServices()
         stereoRangefinder->stop();
     }
 
+    if (pulseRangefinder) {
+        pulseRangefinder->stop();
+    }
+    if (pulseRangefinderThread && pulseRangefinderThread->isRunning()) {
+        pulseRangefinderThread->quit();
+        pulseRangefinderThread->wait(1000);
+    }
+
     if (canReaderWriter) {
         emit startCanRecv(false);
         canReaderWriter->setStopFlag(true);
@@ -754,9 +882,6 @@ void MainWindow::showDistance(int mm)
     updateTargetDistance(mm);
     int dm = mm / 100;
 
-    QString msg = QString("Distance = %1 mm").arg(mm);
-    MY_CONSOLE_A(msg);
-
     if constexpr (app_config::kRangefinderSendDistanceToCan) {
 
     // 2. Формируем CAN кадр
@@ -781,10 +906,28 @@ void MainWindow::showDistance(int mm)
     }
 }
 
+void MainWindow::showPulseDistance(int mm)
+{
+    const uint64_t now = monotonicMs();
+    pulseRangefinderDistanceMm = mm;
+    pulseRangefinderDataState = QString("DATA %1 mm").arg(mm);
+    pulseRangefinderLastPacketMs = now;
+    pulseRangefinderLastDistanceMs = now;
+    showDistance(mm);
+    MY_CONSOLE_A(QString("[RF] Distance = %1 mm").arg(mm));
+    updateSystemStatusPanel();
+}
+
 void MainWindow::showStereoDistance(double rawDistance, int mm)
 {
+    const uint64_t now = monotonicMs();
+    stereoRangefinderDistanceMm = mm;
+    stereoRangefinderLastDistanceMs = now;
     showDistance(mm);
-    MY_CONSOLE_A(QString("Stereo distance raw = %1").arg(rawDistance, 0, 'f', 3));
+    MY_CONSOLE_A(QString("[SRF] Distance = %1 mm (%2 m)")
+                     .arg(mm)
+                     .arg(rawDistance, 0, 'f', 3));
+    updateSystemStatusPanel();
 }
 
 void MainWindow::showStatus(const QString& msg)
