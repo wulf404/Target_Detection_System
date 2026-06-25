@@ -22,10 +22,11 @@ constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quad
 constexpr std::uint64_t kLatencyLogEveryNFrames = 1;
 
 // Dynamic YOLO pipeline over a 4K input frame:
-// SEARCH = full frame, TRACK = ROI around the last target, LOST = expanding ROI.
+// SEARCH = full frame, TRACK = square input-sized ROI around target,
+// LOST = expanding ROI from that square up to full frame.
 constexpr bool kYoloDynamicRoiEnabled = true;
 constexpr bool kYoloDynamicRoiDrawOverlay = true;
-constexpr double kYoloRoiBoxScale = 4.0;
+constexpr double kYoloRoiBoxScale = 4.0; // Used when target is lost.
 constexpr double kYoloRoiLostExpansion = 1.35;
 constexpr double kYoloRoiMinWidthRatio = 0.25;
 constexpr double kYoloRoiMinHeightRatio = 0.25;

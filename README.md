@@ -126,8 +126,8 @@ CAN telemetry -> can_work -> TurretState / UI/status
 
 ```text
 SEARCH_FULL -> полный кадр 4K, direct resize в 1280x1280
-TRACK_ROI   -> crop вокруг последнего bbox, direct resize crop в 1280x1280
-LOST_ROI    -> расширяющийся crop после краткой потери цели
+TRACK_ROI   -> квадратный crop 1280x1280 вокруг последнего bbox, без resize если input уже 1280
+LOST_ROI    -> расширяющийся crop после краткой потери цели, до полного кадра
 ```
 
 При сопровождении это уменьшает стоимость загрузки/resize входа и повышает

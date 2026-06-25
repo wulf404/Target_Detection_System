@@ -177,33 +177,25 @@ cv::Rect clampRectToFrame(const cv::Rect& rect, const cv::Size& frameSize)
     return rect & cv::Rect(0, 0, frameSize.width, frameSize.height);
 }
 
-cv::Rect centeredAspectRect(const cv::Point2d& center,
-                            double width,
-                            double height,
-                            const cv::Size& frameSize)
+cv::Rect centeredRect(const cv::Point2d& center,
+                      double width,
+                      double height,
+                      const cv::Size& frameSize)
 {
     if (frameSize.width <= 0 || frameSize.height <= 0) {
         return cv::Rect();
     }
 
-    const double aspect = static_cast<double>(frameSize.width) /
-                          static_cast<double>(frameSize.height);
-    width = std::max(2.0, width);
-    height = std::max(2.0, height);
+    width = std::clamp(width, 2.0, static_cast<double>(frameSize.width));
+    height = std::clamp(height, 2.0, static_cast<double>(frameSize.height));
 
-    if ((width / height) < aspect) {
-        width = height * aspect;
-    } else {
-        height = width / aspect;
-    }
-
-    width = std::min(width, static_cast<double>(frameSize.width));
-    height = std::min(height, static_cast<double>(frameSize.height));
-
-    int x = cvRound(center.x - width * 0.5);
-    int y = cvRound(center.y - height * 0.5);
     int w = cvRound(width);
     int h = cvRound(height);
+    w = std::clamp(w, 1, frameSize.width);
+    h = std::clamp(h, 1, frameSize.height);
+
+    int x = cvRound(center.x - w * 0.5);
+    int y = cvRound(center.y - h * 0.5);
 
     x = std::clamp(x, 0, std::max(0, frameSize.width - w));
     y = std::clamp(y, 0, std::max(0, frameSize.height - h));
@@ -213,27 +205,36 @@ cv::Rect centeredAspectRect(const cv::Point2d& center,
 
 cv::Rect dynamicRoiForTarget(const cv::Rect& targetBox,
                              const cv::Size& frameSize,
-                             int lostFrames)
+                             int lostFrames,
+                             int networkInputSide)
 {
     if (targetBox.area() <= 0 || frameSize.width <= 0 || frameSize.height <= 0) {
         return cv::Rect(0, 0, frameSize.width, frameSize.height);
     }
 
-    const double lostScale = std::pow(app_config::kYoloRoiLostExpansion,
-                                      std::max(0, lostFrames));
+    const cv::Point2d center(targetBox.x + targetBox.width * 0.5,
+                             targetBox.y + targetBox.height * 0.5);
+    const double trackSide = std::max(2.0, static_cast<double>(networkInputSide));
+    if (lostFrames <= 0) {
+        return centeredRect(center, trackSide, trackSide, frameSize);
+    }
+
     const double minWidth = static_cast<double>(frameSize.width) *
                             app_config::kYoloRoiMinWidthRatio;
     const double minHeight = static_cast<double>(frameSize.height) *
                              app_config::kYoloRoiMinHeightRatio;
-    const double width = std::max(static_cast<double>(targetBox.width) *
-                                  app_config::kYoloRoiBoxScale,
-                                  minWidth) * lostScale;
-    const double height = std::max(static_cast<double>(targetBox.height) *
-                                   app_config::kYoloRoiBoxScale,
-                                   minHeight) * lostScale;
-    const cv::Point2d center(targetBox.x + targetBox.width * 0.5,
-                             targetBox.y + targetBox.height * 0.5);
-    return centeredAspectRect(center, width, height, frameSize);
+    const double baseSide = std::max({
+        trackSide,
+        static_cast<double>(targetBox.width) * app_config::kYoloRoiBoxScale,
+        static_cast<double>(targetBox.height) * app_config::kYoloRoiBoxScale,
+        minWidth,
+        minHeight
+    });
+    const double side = baseSide *
+                        std::pow(app_config::kYoloRoiLostExpansion,
+                                 std::max(0, lostFrames));
+
+    return centeredRect(center, side, side, frameSize);
 }
 
 bool isFullFrameRoi(const cv::Rect& roi, const cv::Size& frameSize)
@@ -597,7 +598,11 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         lost_target_frames <= app_config::kYoloRoiMaxLostFramesBeforeSearch;
 
     if (canUseDynamicRoi) {
-        inferenceRoi = dynamicRoiForTarget(last_target_box, frame.size(), lost_target_frames);
+        const int networkInputSide = std::max(yolo_width, yolo_height);
+        inferenceRoi = dynamicRoiForTarget(last_target_box,
+                                           frame.size(),
+                                           lost_target_frames,
+                                           networkInputSide);
         if (inferenceRoi.area() <= 0) {
             inferenceRoi = fullFrameRoi;
         }
@@ -622,14 +627,21 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     try {
         gpu_frame_u8.upload(inferenceFrame, gpu_stream);
 
-        cv::cuda::resize(gpu_frame_u8, gpu_resized_u8,
-                         cv::Size(yolo_width, yolo_height),
-                         0, 0, cv::INTER_LINEAR, gpu_stream);
+        const bool inputAlreadySized =
+            inferenceFrame.cols == yolo_width &&
+            inferenceFrame.rows == yolo_height;
+        cv::cuda::GpuMat* preprocessInput = &gpu_frame_u8;
+        if (!inputAlreadySized) {
+            cv::cuda::resize(gpu_frame_u8, gpu_resized_u8,
+                             cv::Size(yolo_width, yolo_height),
+                             0, 0, cv::INTER_LINEAR, gpu_stream);
+            preprocessInput = &gpu_resized_u8;
+        }
 
         cudaStream_t s = cv::cuda::StreamAccessor::getStream(gpu_stream);
 
         bool ok = cuda_preprocess_bgr_to_nchw_ptr(
-            gpu_resized_u8,
+            *preprocessInput,
             static_cast<float*>(trtInputDevice),
             yolo_width, yolo_height,
             (float)scale,
