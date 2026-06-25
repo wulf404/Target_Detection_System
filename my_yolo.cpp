@@ -12,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <chrono>
 
 static inline double ms(const cv::TickMeter& tm) { return tm.getTimeMilli(); }
 
@@ -25,14 +26,39 @@ struct TargetCandidate
     int area = 0;
     float confidence = 0.0f;
     double score = 0.0;
+    bool suspicious = false;
 };
 
-constexpr int TARGET_MEMORY_FRAMES = 15;
-constexpr double CONF_SCORE = 1000.0;
-constexpr double AREA_SCORE = 0.7;
-constexpr double DIST_PENALTY = 0.6;
-constexpr double STICKY_RADIUS_PX = 260.0;
-constexpr double STICKY_BONUS = 180.0;
+uint64_t monotonicMs()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+double clamp01(double value)
+{
+    return std::clamp(value, 0.0, 1.0);
+}
+
+double hypotSize(const cv::Size2d& size)
+{
+    return std::hypot(size.width, size.height);
+}
+
+cv::Point roundPoint(const cv::Point2d& point)
+{
+    return cv::Point(cvRound(point.x), cvRound(point.y));
+}
+
+cv::Rect rectFromCenterSize(const cv::Point2d& center, const cv::Size2d& size)
+{
+    const int w = std::max(1, cvRound(size.width));
+    const int h = std::max(1, cvRound(size.height));
+    return cv::Rect(cvRound(center.x - w * 0.5),
+                    cvRound(center.y - h * 0.5),
+                    w,
+                    h);
+}
 
 int64_t dimsVolume(const nvinfer1::Dims& dims)
 {
@@ -153,19 +179,22 @@ void drawTrackingOverlay(cv::Mat& frame, const cv::Point* selectedCenter)
 }
 
 double targetScore(const TargetCandidate& candidate,
-                   bool have_last_target,
-                   const cv::Point& last_target_center)
+                   bool havePrediction,
+                   const cv::Point2d& predictedCenter)
 {
-    double score = static_cast<double>(candidate.confidence) * CONF_SCORE;
-    score += std::sqrt(static_cast<double>(candidate.area)) * AREA_SCORE;
+    double score = static_cast<double>(candidate.confidence) *
+                   app_config::kYoloCandidateConfidenceScore;
+    score += std::sqrt(static_cast<double>(candidate.area)) *
+             app_config::kYoloCandidateAreaScore;
 
-    if (have_last_target) {
-        const double dx = static_cast<double>(candidate.center.x - last_target_center.x);
-        const double dy = static_cast<double>(candidate.center.y - last_target_center.y);
+    if (havePrediction) {
+        const double dx = static_cast<double>(candidate.center.x) - predictedCenter.x;
+        const double dy = static_cast<double>(candidate.center.y) - predictedCenter.y;
         const double dist = std::hypot(dx, dy);
-        score -= std::min(dist, 1000.0) * DIST_PENALTY;
-        if (dist <= STICKY_RADIUS_PX) {
-            score += STICKY_BONUS;
+        score -= std::min(dist, 1000.0) *
+                 app_config::kYoloCandidateDistancePenalty;
+        if (dist <= app_config::kYoloCandidateStickyRadiusPx) {
+            score += app_config::kYoloCandidateStickyBonus;
         }
     }
 
@@ -229,7 +258,8 @@ bool sameRect(const cv::Rect& a, const cv::Rect& b)
 cv::Rect dynamicRoiForTarget(const cv::Rect& targetBox,
                              const cv::Size& frameSize,
                              int lostFrames,
-                             int networkInputSide)
+                             int networkInputSide,
+                             double trackQuality)
 {
     if (targetBox.area() <= 0 || frameSize.width <= 0 || frameSize.height <= 0) {
         return cv::Rect(0, 0, frameSize.width, frameSize.height);
@@ -237,7 +267,18 @@ cv::Rect dynamicRoiForTarget(const cv::Rect& targetBox,
 
     const cv::Point2d center(targetBox.x + targetBox.width * 0.5,
                              targetBox.y + targetBox.height * 0.5);
-    const double trackSide = std::max(2.0, static_cast<double>(networkInputSide));
+    const double qualityForMin = std::max(0.01, app_config::kYoloTrackRoiQualityForMinScale);
+    const double qualityRatio = clamp01(trackQuality / qualityForMin);
+    const double inputScale =
+        app_config::kYoloTrackRoiLowQualityInputScale +
+        (app_config::kYoloTrackRoiMinInputScale -
+         app_config::kYoloTrackRoiLowQualityInputScale) * qualityRatio;
+    const double trackSide = std::max({
+        2.0,
+        static_cast<double>(networkInputSide) * inputScale,
+        static_cast<double>(std::max(targetBox.width, targetBox.height)) *
+            app_config::kYoloTrackRoiTargetBoxScale
+    });
     if (lostFrames <= 0) {
         return centeredVirtualRect(center, trackSide, trackSide);
     }
@@ -608,7 +649,35 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     CV_Assert(!frame.empty());
     CV_Assert(frame.type() == CV_8UC3);
 
+    const uint64_t frameNowMs = monotonicMs();
+    auto predictTrackCenter = [this](uint64_t nowMsValue) {
+        if (!have_track_model || track_last_update_ms == 0) {
+            return track_center_f;
+        }
+
+        const double rawDtMs = nowMsValue >= track_last_update_ms
+            ? static_cast<double>(nowMsValue - track_last_update_ms)
+            : 0.0;
+        const double dtMs = std::clamp(rawDtMs,
+                                       0.0,
+                                       app_config::kYoloMotionMaxPredictMs);
+        const double dtSec = dtMs / 1000.0;
+        return cv::Point2d(track_center_f.x + track_velocity_px_s.x * dtSec,
+                           track_center_f.y + track_velocity_px_s.y * dtSec);
+    };
+
     const cv::Rect fullFrameRoi(0, 0, frame.cols, frame.rows);
+    const cv::Point2d predictedCenter = have_track_model
+        ? predictTrackCenter(frameNowMs)
+        : cv::Point2d(last_target_center.x, last_target_center.y);
+    const cv::Size2d predictedBoxSize = have_track_model
+        ? track_box_size_f
+        : cv::Size2d(last_target_box.width, last_target_box.height);
+    const cv::Rect roiAnchorBox = have_track_model &&
+                                  predictedBoxSize.width > 0.0 &&
+                                  predictedBoxSize.height > 0.0
+        ? rectFromCenterSize(predictedCenter, predictedBoxSize)
+        : last_target_box;
     cv::Rect inferenceRoi = fullFrameRoi;
     cv::Rect visibleInferenceRoi = fullFrameRoi;
     const bool periodicFullScan =
@@ -623,10 +692,11 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
 
     if (canUseDynamicRoi) {
         const int networkInputSide = std::max(yolo_width, yolo_height);
-        inferenceRoi = dynamicRoiForTarget(last_target_box,
+        inferenceRoi = dynamicRoiForTarget(roiAnchorBox,
                                            frame.size(),
                                            lost_target_frames,
-                                           networkInputSide);
+                                           networkInputSide,
+                                           track_quality);
         if (inferenceRoi.area() <= 0) {
             inferenceRoi = fullFrameRoi;
         }
@@ -811,6 +881,59 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     std::vector<TargetCandidate> candidates;
     candidates.reserve(keep_idx.size());
 
+    const bool jumpGuardActive = have_track_model &&
+                                 (track_confirmed || acquire_hit_frames > 0) &&
+                                 predictedBoxSize.width > 0.0 &&
+                                 predictedBoxSize.height > 0.0;
+    const double predictDtMs = have_track_model && track_last_update_ms != 0 &&
+                               frameNowMs >= track_last_update_ms
+        ? static_cast<double>(frameNowMs - track_last_update_ms)
+        : 0.0;
+    const double predictDtSec = std::clamp(
+        predictDtMs / 1000.0,
+        0.02,
+        app_config::kYoloMotionMaxPredictMs / 1000.0
+    );
+    const double predictedDiag = std::max(1.0, hypotSize(predictedBoxSize));
+    const double predictedSpeed = std::hypot(track_velocity_px_s.x,
+                                             track_velocity_px_s.y);
+
+    auto isSuspiciousCandidate = [&](const TargetCandidate& candidate) {
+        if (!jumpGuardActive) {
+            return false;
+        }
+
+        const double dx = static_cast<double>(candidate.center.x) - predictedCenter.x;
+        const double dy = static_cast<double>(candidate.center.y) - predictedCenter.y;
+        const double dist = std::hypot(dx, dy);
+        double allowedDist =
+            app_config::kYoloTrackMaxJumpBasePx +
+            predictedDiag * app_config::kYoloTrackMaxJumpBoxDiagRatio +
+            predictedSpeed * predictDtSec * app_config::kYoloTrackVelocityGateScale;
+        allowedDist *= 1.0 +
+            (1.0 - clamp01(track_quality)) * app_config::kYoloTrackLowQualityGateRelax;
+        allowedDist += static_cast<double>(lost_target_frames) *
+                       app_config::kYoloTrackMaxJumpBasePx * 0.5;
+
+        if (dist > allowedDist) {
+            return true;
+        }
+
+        const double ratioW = std::max(
+            static_cast<double>(candidate.box.width) / std::max(1.0, predictedBoxSize.width),
+            predictedBoxSize.width / std::max(1.0, static_cast<double>(candidate.box.width))
+        );
+        const double ratioH = std::max(
+            static_cast<double>(candidate.box.height) / std::max(1.0, predictedBoxSize.height),
+            predictedBoxSize.height / std::max(1.0, static_cast<double>(candidate.box.height))
+        );
+        const double maxRatio =
+            app_config::kYoloTrackMaxBoxSizeChangeRatio *
+            (1.0 + 0.20 * static_cast<double>(lost_target_frames));
+
+        return ratioW > maxRatio || ratioH > maxRatio;
+    };
+
     for (int idx : keep_idx)
     {
         cv::Rect b = boxes[idx];
@@ -828,7 +951,8 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         candidate.center = cv::Point(b.x + b.width / 2, b.y + b.height / 2);
         candidate.area = b.area();
         candidate.confidence = confidences[idx];
-        candidate.score = targetScore(candidate, have_last_target, last_target_center);
+        candidate.score = targetScore(candidate, have_track_model, predictedCenter);
+        candidate.suspicious = isSuspiciousCandidate(candidate);
 
         candidates.push_back(candidate);
         kept++;
@@ -836,11 +960,40 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
 
     int selected = -1;
     double best_score = -std::numeric_limits<double>::infinity();
+    int suspiciousSelected = -1;
+    double bestSuspiciousScore = -std::numeric_limits<double>::infinity();
     for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+        if (candidates[i].suspicious) {
+            if (candidates[i].score > bestSuspiciousScore) {
+                bestSuspiciousScore = candidates[i].score;
+                suspiciousSelected = i;
+            }
+            continue;
+        }
+
         if (candidates[i].score > best_score) {
             best_score = candidates[i].score;
             selected = i;
         }
+    }
+
+    bool suspiciousOnly = false;
+    if (selected < 0 && suspiciousSelected >= 0) {
+        suspiciousOnly = true;
+        ++suspicious_frames;
+        track_quality = std::max(0.0,
+                                 track_quality - app_config::kYoloTrackQualitySuspiciousDecay);
+
+        if (suspicious_frames >= app_config::kYoloTrackSuspiciousResetFrames) {
+            selected = suspiciousSelected;
+            have_track_model = false;
+            track_confirmed = false;
+            acquire_hit_frames = 0;
+            suspicious_frames = 0;
+            track_quality = 0.0;
+        }
+    } else if (selected >= 0) {
+        suspicious_frames = 0;
     }
 
     const cv::Point* selectedCenter = nullptr;
@@ -899,29 +1052,154 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         ms(tm_fwd),
         postprocessMs);
 
+    auto resetTrackModel = [this]() {
+        have_last_target = false;
+        have_track_model = false;
+        track_confirmed = false;
+        last_target_center = cv::Point();
+        last_target_box = cv::Rect();
+        track_center_f = cv::Point2d();
+        track_velocity_px_s = cv::Point2d();
+        track_box_size_f = cv::Size2d();
+        track_last_update_ms = 0;
+        track_quality = 0.0;
+        acquire_hit_frames = 0;
+        suspicious_frames = 0;
+        lost_target_frames = 0;
+    };
+
+    auto filteredTrackBox = [this, &frame]() {
+        return rectFromCenterSize(track_center_f, track_box_size_f) &
+               cv::Rect(0, 0, frame.cols, frame.rows);
+    };
+
+    auto updateTrackModel = [&](const TargetCandidate& target) {
+        const cv::Point2d measurementCenter(target.center.x, target.center.y);
+        const cv::Size2d measurementSize(target.box.width, target.box.height);
+
+        if (!have_track_model ||
+            track_last_update_ms == 0 ||
+            track_box_size_f.width <= 0.0 ||
+            track_box_size_f.height <= 0.0)
+        {
+            track_center_f = measurementCenter;
+            track_velocity_px_s = cv::Point2d();
+            track_box_size_f = measurementSize;
+            have_track_model = true;
+        } else {
+            const double rawDtMs = frameNowMs >= track_last_update_ms
+                ? static_cast<double>(frameNowMs - track_last_update_ms)
+                : 0.0;
+            const double dtSec = std::clamp(rawDtMs / 1000.0,
+                                            0.001,
+                                            app_config::kYoloMotionMaxPredictMs / 1000.0);
+            const cv::Point2d predicted(
+                track_center_f.x + track_velocity_px_s.x * dtSec,
+                track_center_f.y + track_velocity_px_s.y * dtSec
+            );
+            const cv::Point2d residual(measurementCenter.x - predicted.x,
+                                       measurementCenter.y - predicted.y);
+
+            track_center_f = cv::Point2d(
+                predicted.x + app_config::kYoloMotionAlpha * residual.x,
+                predicted.y + app_config::kYoloMotionAlpha * residual.y
+            );
+            track_velocity_px_s = cv::Point2d(
+                track_velocity_px_s.x +
+                    app_config::kYoloMotionBeta * residual.x / dtSec,
+                track_velocity_px_s.y +
+                    app_config::kYoloMotionBeta * residual.y / dtSec
+            );
+
+            const double speed = std::hypot(track_velocity_px_s.x,
+                                            track_velocity_px_s.y);
+            if (speed > app_config::kYoloMotionMaxVelocityPxPerSec &&
+                speed > 1.0)
+            {
+                const double scale =
+                    app_config::kYoloMotionMaxVelocityPxPerSec / speed;
+                track_velocity_px_s.x *= scale;
+                track_velocity_px_s.y *= scale;
+            }
+
+            const double boxAlpha = clamp01(app_config::kYoloTrackBoxLpfAlpha);
+            track_box_size_f = cv::Size2d(
+                (1.0 - boxAlpha) * track_box_size_f.width +
+                    boxAlpha * measurementSize.width,
+                (1.0 - boxAlpha) * track_box_size_f.height +
+                    boxAlpha * measurementSize.height
+            );
+        }
+
+        track_last_update_ms = frameNowMs;
+        track_quality = std::min(
+            1.0,
+            track_quality +
+                app_config::kYoloTrackQualityHitGain *
+                    (0.5 + 0.5 * static_cast<double>(target.confidence))
+        );
+        ++acquire_hit_frames;
+        lost_target_frames = 0;
+
+        if (!track_confirmed &&
+            acquire_hit_frames >= app_config::kYoloTrackAcquireFrames &&
+            track_quality >= app_config::kYoloTrackAcquireMinQuality)
+        {
+            track_confirmed = true;
+        }
+
+        last_target_center = roundPoint(track_center_f);
+        last_target_box = filteredTrackBox();
+        have_last_target = last_target_box.area() > 0;
+    };
+
     if (selected >= 0) {
         const TargetCandidate& target = candidates[selected];
-        TargetManager::submitCameraTarget(target.center, target.box, frame.size());
+        updateTrackModel(target);
 
-        last_target_center = target.center;
-        last_target_box = target.box;
-        have_last_target = true;
-        lost_target_frames = 0;
+        if (track_confirmed && have_last_target) {
+            TargetManager::submitCameraTarget(last_target_center,
+                                              last_target_box,
+                                              frame.size());
+        } else {
+            TargetManager::submitCameraMiss();
+        }
+
         if (roiMode) {
             ++roi_frames_since_full_scan;
         } else {
             roi_frames_since_full_scan = 0;
         }
     } else {
-        if (have_last_target && ++lost_target_frames > TARGET_MEMORY_FRAMES) {
-            have_last_target = false;
-            last_target_box = cv::Rect();
+        if (have_track_model) {
+            ++lost_target_frames;
+            track_center_f = predictTrackCenter(frameNowMs);
+            track_last_update_ms = frameNowMs;
+            acquire_hit_frames = 0;
+            if (!suspiciousOnly) {
+                track_quality = std::max(
+                    0.0,
+                    track_quality - app_config::kYoloTrackQualityMissDecay
+                );
+            }
+
+            last_target_center = roundPoint(track_center_f);
+            last_target_box = filteredTrackBox();
+            have_last_target = last_target_box.area() > 0;
+        }
+
+        if (have_track_model &&
+            (lost_target_frames > app_config::kYoloTrackMemoryFrames ||
+             track_quality < app_config::kYoloTrackReleaseQuality))
+        {
+            resetTrackModel();
             roi_frames_since_full_scan = 0;
         } else if (roiMode) {
             ++roi_frames_since_full_scan;
         } else {
             roi_frames_since_full_scan = 0;
         }
+
         TargetManager::submitCameraMiss();
     }
     last_inference_roi = inferenceRoi;
@@ -949,6 +1227,10 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
                       << " visible=" << visibleInferenceRoi.x << "," << visibleInferenceRoi.y
                       << " " << visibleInferenceRoi.width << "x" << visibleInferenceRoi.height
                       << " pad=" << (paddedRoi ? 1 : 0)
+                      << " q=" << track_quality
+                      << " acq=" << acquire_hit_frames
+                      << " confirmed=" << (track_confirmed ? 1 : 0)
+                      << " suspicious=" << suspicious_frames
                       << " lost=" << lost_target_frames
                       << " kept=" << kept
                       << " selected=" << (selected >= 0 ? 1 : 0)

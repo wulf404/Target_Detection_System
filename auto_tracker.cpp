@@ -8,6 +8,7 @@
 #include <cmath>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
 
@@ -41,12 +42,18 @@ struct TrackerRuntimeState
     double el_rel_f = 0.0;
     double center_x_f = 0.0;
     double center_y_f = 0.0;
+    double turret_az_vel_dps = 0.0;
+    double turret_el_vel_dps = 0.0;
+    double last_turret_az_deg = 0.0;
+    double last_turret_el_deg = 0.0;
+    uint64_t last_turret_update_ms = 0;
     int active_deadzone_x = 0;
     int active_deadzone_y = 0;
     int active_deadzone_outer_x = 0;
     int active_deadzone_outer_y = 0;
     bool have_last_target = false;
     bool have_filtered_center = false;
+    bool have_turret_velocity = false;
     bool deadzone_hold_active = false;
 };
 
@@ -69,6 +76,70 @@ struct DeadzoneConfig
 int outerDeadzoneFromInner(int inner)
 {
     return std::max(inner + 1, static_cast<int>(std::round(inner * 1.55)));
+}
+
+uint64_t nowMs()
+{
+    using namespace std::chrono;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        clock_type::now().time_since_epoch()
+    ).count();
+}
+
+double shortestAngleDiffDeg(double current, double previous)
+{
+    double diff = current - previous;
+    while (diff > 180.0) diff -= 360.0;
+    while (diff < -180.0) diff += 360.0;
+    return diff;
+}
+
+void updateTurretVelocityEstimate(const TurretState& turret)
+{
+    if (!turret.fresh || turret.last_update_ms == 0) {
+        return;
+    }
+
+    if (g_tracker_state.last_turret_update_ms == turret.last_update_ms) {
+        return;
+    }
+
+    if (g_tracker_state.last_turret_update_ms != 0 &&
+        turret.last_update_ms > g_tracker_state.last_turret_update_ms)
+    {
+        const double dtSec =
+            static_cast<double>(turret.last_update_ms -
+                                g_tracker_state.last_turret_update_ms) / 1000.0;
+        if (dtSec > 0.001) {
+            const double rawAzVel =
+                shortestAngleDiffDeg(turret.az_deg,
+                                     g_tracker_state.last_turret_az_deg) / dtSec;
+            const double rawElVel =
+                (turret.el_deg - g_tracker_state.last_turret_el_deg) / dtSec;
+            const double alpha = std::clamp(
+                app_config::kAutoTrackTurretMotionCompVelLpfAlpha,
+                0.0,
+                1.0
+            );
+
+            if (!g_tracker_state.have_turret_velocity) {
+                g_tracker_state.turret_az_vel_dps = rawAzVel;
+                g_tracker_state.turret_el_vel_dps = rawElVel;
+                g_tracker_state.have_turret_velocity = true;
+            } else {
+                g_tracker_state.turret_az_vel_dps =
+                    (1.0 - alpha) * g_tracker_state.turret_az_vel_dps +
+                    alpha * rawAzVel;
+                g_tracker_state.turret_el_vel_dps =
+                    (1.0 - alpha) * g_tracker_state.turret_el_vel_dps +
+                    alpha * rawElVel;
+            }
+        }
+    }
+
+    g_tracker_state.last_turret_az_deg = turret.az_deg;
+    g_tracker_state.last_turret_el_deg = turret.el_deg;
+    g_tracker_state.last_turret_update_ms = turret.last_update_ms;
 }
 
 DeadzoneConfig deadzoneForTarget(const cv::Rect& targetBox)
@@ -138,6 +209,9 @@ void AutoTracker::processTarget(const cv::Point& center, const cv::Rect& targetB
     g_tracker_state.active_deadzone_outer_x = deadzone.outerX;
     g_tracker_state.active_deadzone_outer_y = deadzone.outerY;
 
+    const TurretState turret = getTurretState();
+    updateTurretVelocityEstimate(turret);
+
     if (!g_tracker_state.have_filtered_center) {
         g_tracker_state.center_x_f = static_cast<double>(center.x);
         g_tracker_state.center_y_f = static_cast<double>(center.y);
@@ -183,8 +257,43 @@ void AutoTracker::processTarget(const cv::Point& center, const cv::Rect& targetB
     const double nx = dx / frame_width;
     const double ny = dy / frame_height;
 
-    const double az_err_deg = nx * CAMERA_FOV_H_DEG;
-    const double el_err_deg = ny * CAMERA_FOV_V_DEG;
+    double az_err_deg = nx * CAMERA_FOV_H_DEG;
+    double el_err_deg = ny * CAMERA_FOV_V_DEG;
+
+    double az_motion_comp_deg = 0.0;
+    double el_motion_comp_deg = 0.0;
+    if (app_config::kAutoTrackTurretMotionCompEnabled &&
+        turret.fresh &&
+        g_tracker_state.have_turret_velocity)
+    {
+        const uint64_t now_ms = nowMs();
+        const double telemetryAgeMs = turret.last_update_ms != 0 && now_ms >= turret.last_update_ms
+            ? static_cast<double>(now_ms - turret.last_update_ms)
+            : 0.0;
+        const double leadMs = std::clamp(
+            app_config::kAutoTrackTurretMotionCompLeadMs +
+                telemetryAgeMs * app_config::kAutoTrackTurretMotionCompTelemetryAgeScale,
+            0.0,
+            app_config::kAutoTrackTurretMotionCompMaxLeadMs
+        );
+        const double leadSec = leadMs / 1000.0;
+
+        az_motion_comp_deg = std::clamp(
+            g_tracker_state.turret_az_vel_dps * leadSec *
+                app_config::kAutoTrackTurretMotionCompAzGain,
+            -app_config::kAutoTrackTurretMotionCompMaxDeg,
+            app_config::kAutoTrackTurretMotionCompMaxDeg
+        );
+        el_motion_comp_deg = std::clamp(
+            g_tracker_state.turret_el_vel_dps * leadSec *
+                app_config::kAutoTrackTurretMotionCompElGain,
+            -app_config::kAutoTrackTurretMotionCompMaxDeg,
+            app_config::kAutoTrackTurretMotionCompMaxDeg
+        );
+
+        az_err_deg += az_motion_comp_deg;
+        el_err_deg += el_motion_comp_deg;
+    }
 
     double az_rel = az_err_deg * g_AZ_K;
     double el_rel = -el_err_deg * g_EL_K;
@@ -198,8 +307,6 @@ void AutoTracker::processTarget(const cv::Point& center, const cv::Rect& targetB
         az_cmd_rel *= g_P_AZ;
         el_cmd_rel *= g_P_EL;
     }
-
-    const TurretState turret = getTurretState();
 
     const auto target = turret_control::normalize({
         turret.az_deg + az_cmd_rel,
@@ -246,7 +353,9 @@ void AutoTracker::processTarget(const cv::Point& center, const cv::Rect& targetB
               << " filtered=(" << std::lround(g_tracker_state.center_x_f)
               << "," << std::lround(g_tracker_state.center_y_f) << ") -> "
               << "AZ=" << target.az << "  EL=" << target.el
-              << "  (relAZ=" << az_cmd_rel << " relEL=" << el_cmd_rel << ")"
+              << "  (relAZ=" << az_cmd_rel << " relEL=" << el_cmd_rel
+              << " compAZ=" << az_motion_comp_deg
+              << " compEL=" << el_motion_comp_deg << ")"
               << std::endl;
 }
 

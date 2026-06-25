@@ -33,8 +33,56 @@ constexpr double kYoloRoiMinHeightRatio = 0.25;
 constexpr int kYoloRoiFullScanPeriodFrames = 45;
 constexpr int kYoloRoiMaxLostFramesBeforeSearch = 8;
 
+// Candidate scoring: higher confidence/area helps, distance from predicted target hurts.
+constexpr double kYoloCandidateConfidenceScore = 1000.0; // Weight of NN confidence.
+constexpr double kYoloCandidateAreaScore = 0.7;          // Small bonus for larger bbox.
+constexpr double kYoloCandidateDistancePenalty = 0.65;   // Penalty per px from prediction.
+constexpr double kYoloCandidateStickyRadiusPx = 260.0;   // Radius where old target gets bonus.
+constexpr double kYoloCandidateStickyBonus = 180.0;      // Bonus inside sticky radius.
+
+// Motion filter: alpha corrects position, beta corrects velocity.
+constexpr double kYoloMotionAlpha = 0.68;                // Position correction strength.
+constexpr double kYoloMotionBeta = 0.22;                 // Velocity correction strength.
+constexpr double kYoloMotionMaxPredictMs = 220.0;        // Prediction horizon clamp.
+constexpr double kYoloMotionMaxVelocityPxPerSec = 7000.0;// Velocity clamp.
+constexpr double kYoloTrackBoxLpfAlpha = 0.45;           // BBox size smoothing.
+
+// Track quality/acquire: target is submitted to guidance only after stable acquire.
+constexpr int kYoloTrackAcquireFrames = 2;               // Hits before guidance accepts target.
+constexpr int kYoloTrackMemoryFrames = 15;               // Misses before track is forgotten.
+constexpr int kYoloTrackSuspiciousResetFrames = 2;       // Repeated jumps start new acquire.
+constexpr double kYoloTrackAcquireMinQuality = 0.28;     // Min quality to leave ACQUIRE.
+constexpr double kYoloTrackReleaseQuality = 0.12;        // Quality below this drops track.
+constexpr double kYoloTrackQualityHitGain = 0.20;        // Quality gain on accepted hit.
+constexpr double kYoloTrackQualityMissDecay = 0.16;      // Quality loss on miss.
+constexpr double kYoloTrackQualitySuspiciousDecay = 0.24;// Quality loss on rejected jump.
+
+// Jump guard: rejects sudden bbox jumps unless they repeat and start a new acquire.
+constexpr double kYoloTrackMaxJumpBasePx = 170.0;        // Base allowed center jump.
+constexpr double kYoloTrackMaxJumpBoxDiagRatio = 1.20;   // Extra gate from bbox diagonal.
+constexpr double kYoloTrackVelocityGateScale = 1.20;     // Extra gate from predicted speed.
+constexpr double kYoloTrackLowQualityGateRelax = 0.80;   // Wider gate when quality is low.
+constexpr double kYoloTrackMaxBoxSizeChangeRatio = 2.60; // Max one-frame bbox size ratio.
+
+// TRACK ROI: high quality keeps 1x input side, lower quality widens the square.
+constexpr double kYoloTrackRoiMinInputScale = 1.0;       // ROI side at good quality.
+constexpr double kYoloTrackRoiLowQualityInputScale = 1.35;// ROI side at low quality.
+constexpr double kYoloTrackRoiQualityForMinScale = 0.75; // Quality that reaches min ROI.
+constexpr double kYoloTrackRoiTargetBoxScale = 2.2;      // ROI cannot be smaller than bbox*scale.
+
 constexpr double kCameraFovHDeg = 25.0;
 constexpr double kCameraFovVDeg = 14.5;
+
+// Turret motion compensation in auto-guidance.
+// LeadMs is expected camera+inference+command delay; gains set sign and strength.
+constexpr bool kAutoTrackTurretMotionCompEnabled = true;
+constexpr double kAutoTrackTurretMotionCompLeadMs = 60.0;          // Fixed delay estimate.
+constexpr double kAutoTrackTurretMotionCompTelemetryAgeScale = 0.5;// Adds part of telemetry age.
+constexpr double kAutoTrackTurretMotionCompMaxLeadMs = 140.0;      // Lead clamp.
+constexpr double kAutoTrackTurretMotionCompAzGain = -1.0;          // AZ compensation sign/gain.
+constexpr double kAutoTrackTurretMotionCompElGain = -1.0;          // EL compensation sign/gain.
+constexpr double kAutoTrackTurretMotionCompVelLpfAlpha = 0.35;     // Turret velocity smoothing.
+constexpr double kAutoTrackTurretMotionCompMaxDeg = 1.2;           // Max angular correction.
 
 // Stereo rangefinder connected to Jetson UART.
 constexpr bool kStereoRangefinderEnabled = true;
