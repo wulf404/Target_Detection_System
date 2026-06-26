@@ -19,7 +19,7 @@ constexpr const char* kYoloWeightsPath = kYoloEnginePath;
 constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quadro_3000.names";
 
 // Период логирования задержки: 1 = каждый кадр инференса, 5 = каждый пятый кадр.
-constexpr std::uint64_t kLatencyLogEveryNFrames = 1;
+constexpr std::uint64_t kLatencyLogEveryNFrames = 30;
 
 // Динамический YOLO пайплайн для входного 4K кадра:
 // SEARCH = полный кадр, TRACK = виртуальный ROI фиксированного размера вокруг цели,

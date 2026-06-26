@@ -31,4 +31,17 @@ bool cuda_preprocess_bgr_to_nchw_ptr(
     cudaStream_t stream
 );
 
+bool cuda_preprocess_bgr_resize_to_nchw_ptr(
+    const cv::cuda::GpuMat& src_bgr_u8,
+    float* out_blob_f32,
+    int out_w,
+    int out_h,
+    float scale,
+    float mean_b,
+    float mean_g,
+    float mean_r,
+    bool swapRB,
+    cudaStream_t stream
+);
+
 #endif // CUDA_PREPROCESS_H

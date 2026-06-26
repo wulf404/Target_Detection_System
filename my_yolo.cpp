@@ -364,8 +364,6 @@ my_yolo::my_yolo()
     keep_idx.reserve(256);
 
     outs.reserve(3);
-
-    gpu_resized_u8.create(yolo_height, yolo_width, CV_8UC3);
 }
 
 my_yolo::~my_yolo()
@@ -759,33 +757,21 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     bool inputReady = false;
 #if ENABLE_CUDA_PREPROCESS
     try {
-        gpu_frame_u8.upload(inferenceFrame, gpu_stream);
+        cv::cuda::Stream preprocessStream =
+            cv::cuda::StreamAccessor::wrapStream(trtStream);
+        gpu_frame_u8.upload(inferenceFrame, preprocessStream);
 
-        const bool inputAlreadySized =
-            inferenceFrame.cols == yolo_width &&
-            inferenceFrame.rows == yolo_height;
-        cv::cuda::GpuMat* preprocessInput = &gpu_frame_u8;
-        if (!inputAlreadySized) {
-            cv::cuda::resize(gpu_frame_u8, gpu_resized_u8,
-                             cv::Size(yolo_width, yolo_height),
-                             0, 0, cv::INTER_LINEAR, gpu_stream);
-            preprocessInput = &gpu_resized_u8;
-        }
-
-        cudaStream_t s = cv::cuda::StreamAccessor::getStream(gpu_stream);
-
-        bool ok = cuda_preprocess_bgr_to_nchw_ptr(
-            *preprocessInput,
+        bool ok = cuda_preprocess_bgr_resize_to_nchw_ptr(
+            gpu_frame_u8,
             static_cast<float*>(trtInputDevice),
             yolo_width, yolo_height,
             (float)scale,
             (float)mean[0], (float)mean[1], (float)mean[2],
             swapRB,
-            s
+            trtStream
         );
 
-        gpu_stream.waitForCompletion();
-        if (!ok) throw std::runtime_error("cuda_preprocess_bgr_to_nchw failed");
+        if (!ok) throw std::runtime_error("cuda_preprocess_bgr_resize_to_nchw failed");
         inputReady = true;
     } catch (...) {
         cv::Mat blob = cv::dnn::blobFromImage(inferenceFrame, scale,
