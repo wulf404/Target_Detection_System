@@ -106,6 +106,7 @@ private:
     cv::Point2d track_velocity_px_s;
     cv::Size2d track_box_size_f;
     uint64_t track_last_update_ms = 0;
+    uint64_t track_last_detection_ms = 0;
     double track_quality = 0.0;
     int acquire_hit_frames = 0;
     int suspicious_frames = 0;

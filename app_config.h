@@ -4,10 +4,10 @@
 
 namespace app_config {
 
-// Main input camera resolution. Change these values when the main camera mode changes.
+// Основное разрешение камеры входного сигнала. Изменяйте эти значения при смене режима основной камеры.
 constexpr int kCameraRequestedWidth = 3840;
 constexpr int kCameraRequestedHeight = 2160;
-// Keep empty for automatic /dev/video0..9 probing.
+// Оставьте пустым для автоматического поиска /dev/video0..9.
 constexpr const char* kCameraDevicePathOverride = "";
 constexpr const char* kCameraPreferredNameContains = "HDMI USB Camera";
 constexpr const char* kCameraPreferredVid = "32e4";
@@ -18,73 +18,80 @@ constexpr const char* kYoloEnginePath = "/home/nick/qt/yolo_quadro_weights/quadr
 constexpr const char* kYoloWeightsPath = kYoloEnginePath;
 constexpr const char* kYoloClassesPath = "/home/nick/qt/yolo_quadro_weights/quadro_3000.names";
 
-// Latency console log period: 1 = every inference frame, 5 = every fifth frame.
+// Период логирования задержки: 1 = каждый кадр инференса, 5 = каждый пятый кадр.
 constexpr std::uint64_t kLatencyLogEveryNFrames = 1;
 
-// Dynamic YOLO pipeline over a 4K input frame:
-// SEARCH = full frame, TRACK = virtual padded square input-sized ROI around target,
-// LOST = expanding ROI from that square up to full frame.
+// Динамический YOLO пайплайн для входного 4K кадра:
+// SEARCH = полный кадр, TRACK = виртуальный ROI фиксированного размера вокруг цели,
+// LOST = расширяющийся ROI от этого квадрата до полного кадра.
 constexpr bool kYoloDynamicRoiEnabled = true;
 constexpr bool kYoloDynamicRoiDrawOverlay = true;
-constexpr double kYoloRoiBoxScale = 4.0; // Used when target is lost.
+constexpr double kYoloRoiBoxScale = 4.0; // Используется когда цель потеряна.
 constexpr double kYoloRoiLostExpansion = 1.35;
 constexpr double kYoloRoiMinWidthRatio = 0.25;
 constexpr double kYoloRoiMinHeightRatio = 0.25;
 constexpr int kYoloRoiFullScanPeriodFrames = 45;
 constexpr int kYoloRoiMaxLostFramesBeforeSearch = 8;
 
-// Candidate scoring: higher confidence/area helps, distance from predicted target hurts.
-constexpr double kYoloCandidateConfidenceScore = 1000.0; // Weight of NN confidence.
-constexpr double kYoloCandidateAreaScore = 0.7;          // Small bonus for larger bbox.
-constexpr double kYoloCandidateDistancePenalty = 0.65;   // Penalty per px from prediction.
-constexpr double kYoloCandidateStickyRadiusPx = 260.0;   // Radius where old target gets bonus.
-constexpr double kYoloCandidateStickyBonus = 180.0;      // Bonus inside sticky radius.
+// Оценка кандидатов: высокая уверенность/размер помогают, расстояние от предсказания — штраф.
+constexpr double kYoloCandidateConfidenceScore = 1000.0; // Вес уверенности нейросети.
+constexpr double kYoloCandidateAreaScore = 0.7;          // Небольшой бонус за размер bbox.
+constexpr double kYoloCandidateDistancePenalty = 0.65;   // Штраф за пиксель от предсказания.
+constexpr double kYoloCandidateStickyRadiusPx = 260.0;   // Радиус, где старая цель получает бонус.
+constexpr double kYoloCandidateStickyBonus = 180.0;      // Бонус внутри "липкого" радиуса.
 
-// Motion filter: alpha corrects position, beta corrects velocity.
-constexpr double kYoloMotionAlpha = 0.68;                // Position correction strength.
-constexpr double kYoloMotionBeta = 0.22;                 // Velocity correction strength.
-constexpr double kYoloMotionMaxPredictMs = 220.0;        // Prediction horizon clamp.
-constexpr double kYoloMotionMaxVelocityPxPerSec = 7000.0;// Velocity clamp.
-constexpr double kYoloTrackBoxLpfAlpha = 0.45;           // BBox size smoothing.
+// Фильтр движения: alpha корректирует позицию, beta корректирует скорость.
+constexpr double kYoloMotionAlpha = 0.68;                // Сила коррекции позиции.
+constexpr double kYoloMotionBeta = 0.22;                 // Сила коррекции скорости.
+constexpr double kYoloMotionMaxPredictMs = 220.0;        // Ограничение горизонта предсказания.
+constexpr double kYoloMotionMaxVelocityPxPerSec = 7000.0;// Ограничение скорости.
+constexpr double kYoloTrackBoxLpfAlpha = 0.45;           // Сглаживание размера bbox.
 
-// Track quality/acquire: target is submitted to guidance only after stable acquire.
-constexpr int kYoloTrackAcquireFrames = 2;               // Hits before guidance accepts target.
-constexpr int kYoloTrackMemoryFrames = 15;               // Misses before track is forgotten.
-constexpr int kYoloTrackSuspiciousResetFrames = 2;       // Repeated jumps start new acquire.
-constexpr double kYoloTrackAcquireMinQuality = 0.28;     // Min quality to leave ACQUIRE.
-constexpr double kYoloTrackReleaseQuality = 0.12;        // Quality below this drops track.
-constexpr double kYoloTrackQualityHitGain = 0.20;        // Quality gain on accepted hit.
-constexpr double kYoloTrackQualityMissDecay = 0.16;      // Quality loss on miss.
-constexpr double kYoloTrackQualitySuspiciousDecay = 0.24;// Quality loss on rejected jump.
+// Качество трека/захвата: цель передаётся в наведение только после стабильного захвата.
+constexpr int kYoloTrackAcquireFrames = 2;               // Кол-во попаданий для перехода в захват.
+constexpr int kYoloTrackMemoryFrames = 15;               // Кол-во пропусков до удаления трека.
+constexpr int kYoloTrackSuspiciousResetFrames = 2;       // Повторные скачки начинают новый захват.
+constexpr double kYoloTrackAcquireMinQuality = 0.28;     // Минимальное качество для выхода из ACQUIRE.
+constexpr double kYoloTrackReleaseQuality = 0.12;        // Качество ниже этого сбрасывает трек.
+constexpr double kYoloTrackQualityHitGain = 0.20;        // Рост качества при попадании.
+constexpr double kYoloTrackQualityMissDecay = 0.16;      // Падение качества при пропуске.
+constexpr double kYoloTrackQualitySuspiciousDecay = 0.24;// Падение качества при подозрительном скачке.
 
-// Jump guard: rejects sudden bbox jumps unless they repeat and start a new acquire.
-constexpr double kYoloTrackMaxJumpBasePx = 170.0;        // Base allowed center jump.
-constexpr double kYoloTrackMaxJumpBoxDiagRatio = 1.20;   // Extra gate from bbox diagonal.
-constexpr double kYoloTrackVelocityGateScale = 1.20;     // Extra gate from predicted speed.
-constexpr double kYoloTrackLowQualityGateRelax = 0.80;   // Wider gate when quality is low.
-constexpr double kYoloTrackMaxBoxSizeChangeRatio = 2.60; // Max one-frame bbox size ratio.
+// Predictive coast: коротко ведем подтвержденную цель по модели движения, если YOLO пропустила кадр.
+constexpr bool kYoloTrackCoastEnabled = true;            // Включить прогноз на коротких пропусках.
+constexpr int kYoloTrackCoastMaxFrames = 6;              // Макс. кадров прогноза без новой детекции.
+constexpr double kYoloTrackCoastMaxMs = 220.0;           // Макс. время прогноза от последней детекции.
+constexpr double kYoloTrackCoastMinQuality = 0.14;       // Минимальное качество, ниже которого прогноз запрещен.
+constexpr double kYoloTrackCoastQualityDecay = 0.05;     // Падение качества на кадр во время прогноза.
 
-// TRACK ROI: high quality keeps 1x input side, lower quality widens the square.
-constexpr double kYoloTrackRoiMinInputScale = 1.0;       // ROI side at good quality.
-constexpr double kYoloTrackRoiLowQualityInputScale = 1.35;// ROI side at low quality.
-constexpr double kYoloTrackRoiQualityForMinScale = 0.75; // Quality that reaches min ROI.
-constexpr double kYoloTrackRoiTargetBoxScale = 2.2;      // ROI cannot be smaller than bbox*scale.
+// Защита от скачков: отклоняет резкие прыжки bbox, если они не повторяются.
+constexpr double kYoloTrackMaxJumpBasePx = 170.0;        // Базовый допустимый скачок центра.
+constexpr double kYoloTrackMaxJumpBoxDiagRatio = 1.20;   // Доп. порог от диагонали bbox.
+constexpr double kYoloTrackVelocityGateScale = 1.20;     // Доп. порог от скорости.
+constexpr double kYoloTrackLowQualityGateRelax = 0.80;   // Более мягкий порог при низком качестве.
+constexpr double kYoloTrackMaxBoxSizeChangeRatio = 2.60; // Макс. изменение размера bbox за кадр.
+
+// ROI трекинга: высокое качество держит 1x вход, низкое качество расширяет квадрат.
+constexpr double kYoloTrackRoiMinInputScale = 1.0;       // Размер ROI при хорошем качестве.
+constexpr double kYoloTrackRoiLowQualityInputScale = 1.35;// Размер ROI при низком качестве.
+constexpr double kYoloTrackRoiQualityForMinScale = 0.75; // Качество для минимального ROI.
+constexpr double kYoloTrackRoiTargetBoxScale = 2.2;      // ROI не может быть меньше bbox*scale.
 
 constexpr double kCameraFovHDeg = 25.0;
 constexpr double kCameraFovVDeg = 14.5;
 
-// Turret motion compensation in auto-guidance.
-// LeadMs is expected camera+inference+command delay; gains set sign and strength.
+// Компенсация движения турели в автотрекинге.
+// LeadMs — ожидаемая задержка камеры+инференса+команд; знаки задают направление компенсации.
 constexpr bool kAutoTrackTurretMotionCompEnabled = true;
-constexpr double kAutoTrackTurretMotionCompLeadMs = 60.0;          // Fixed delay estimate.
-constexpr double kAutoTrackTurretMotionCompTelemetryAgeScale = 0.5;// Adds part of telemetry age.
-constexpr double kAutoTrackTurretMotionCompMaxLeadMs = 140.0;      // Lead clamp.
-constexpr double kAutoTrackTurretMotionCompAzGain = -1.0;          // AZ compensation sign/gain.
-constexpr double kAutoTrackTurretMotionCompElGain = -1.0;          // EL compensation sign/gain.
-constexpr double kAutoTrackTurretMotionCompVelLpfAlpha = 0.35;     // Turret velocity smoothing.
-constexpr double kAutoTrackTurretMotionCompMaxDeg = 1.2;           // Max angular correction.
+constexpr double kAutoTrackTurretMotionCompLeadMs = 60.0;          // Оценка фиксированной задержки.
+constexpr double kAutoTrackTurretMotionCompTelemetryAgeScale = 0.5;// Добавляет часть возраста телеметрии.
+constexpr double kAutoTrackTurretMotionCompMaxLeadMs = 140.0;      // Ограничение задержки.
+constexpr double kAutoTrackTurretMotionCompAzGain = -1.0;          // Коэффициент компенсации по азимуту.
+constexpr double kAutoTrackTurretMotionCompElGain = -1.0;          // Коэффициент компенсации по углу места.
+constexpr double kAutoTrackTurretMotionCompVelLpfAlpha = 0.35;     // Сглаживание скорости турели.
+constexpr double kAutoTrackTurretMotionCompMaxDeg = 1.2;           // Максимальная угловая коррекция.
 
-// Stereo rangefinder connected to Jetson UART.
+// Стереодальномер, подключённый к UART Jetson.
 constexpr bool kStereoRangefinderEnabled = true;
 constexpr const char* kStereoRangefinderPort = "/dev/ttyTHS1";
 constexpr int kStereoRangefinderBaudRate = 9600;
@@ -94,9 +101,9 @@ constexpr int kStereoRangefinderBoxRefreshMs = 200;
 constexpr int kStereoRangefinderBoxRefreshMinMovePx = 20;
 constexpr double kStereoRangefinderBoxRefreshMoveRatio = 0.12;
 constexpr double kStereoRangefinderDistanceToMm = 1000.0;
-// BBox coordinates from YOLO are scaled from source frame to the stereo frame.
-// Set source to the main camera coordinate system and frame to the resolution
-// expected by the stereo rangefinder. 0 means "use the actual camera frame".
+// Координаты bbox из YOLO масштабируются из исходного кадра в стерео-кадр.
+// Установите исходный размер как разрешение основной камеры и кадр как разрешение,
+// ожидаемое дальномером. 0 означает "использовать фактический кадр камеры".
 constexpr int kStereoRangefinderSourceFrameWidth = kCameraRequestedWidth;
 constexpr int kStereoRangefinderSourceFrameHeight = kCameraRequestedHeight;
 constexpr int kStereoRangefinderFrameWidth = 1920;
@@ -104,15 +111,15 @@ constexpr int kStereoRangefinderFrameHeight = 1080;
 constexpr bool kStereoRangefinderUseRightStream = false;
 constexpr bool kStereoRangefinderSendStopProgramOnClose = false;
 
-// Pulse rangefinder connected through USB-UART. "auto" uses serial_port_resolver.
+// Пульсовый дальномер через USB-UART. "auto" использует serial_port_resolver.
 constexpr bool kPulseRangefinderEnabled = true;
 constexpr const char* kPulseRangefinderPort = "auto";
 
-// External coordinate protocol uses centidegrees.
-// yaw=-0.01 and pitch=-0.01 are sent as -1, -1: link is alive, but there is no target.
+// Внешний координатный протокол использует сантиградусы.
+// yaw=-0.01 и pitch=-0.01 отправляются как -1, -1: связь есть, но цели нет.
 constexpr std::int16_t kExternalNoTargetAzCentideg = -1;
 constexpr std::int16_t kExternalNoTargetElCentideg = -1;
 
 constexpr bool kRangefinderSendDistanceToCan = false;
 
-} // namespace app_config
+}// namespace app_config

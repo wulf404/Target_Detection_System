@@ -50,6 +50,18 @@ cv::Point roundPoint(const cv::Point2d& point)
     return cv::Point(cvRound(point.x), cvRound(point.y));
 }
 
+cv::Point clampPointToFrame(const cv::Point& point, const cv::Size& frameSize)
+{
+    if (frameSize.width <= 0 || frameSize.height <= 0) {
+        return point;
+    }
+
+    return cv::Point(
+        std::clamp(point.x, 0, frameSize.width - 1),
+        std::clamp(point.y, 0, frameSize.height - 1)
+    );
+}
+
 cv::Rect rectFromCenterSize(const cv::Point2d& center, const cv::Size2d& size)
 {
     const int w = std::max(1, cvRound(size.width));
@@ -997,6 +1009,9 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
     }
 
     const cv::Point* selectedCenter = nullptr;
+    bool coastedThisFrame = false;
+    cv::Point coastCenterForOverlay;
+    cv::Rect coastBoxForOverlay;
     if (selected >= 0) {
         selectedCenter = &candidates[selected].center;
     }
@@ -1062,6 +1077,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         track_velocity_px_s = cv::Point2d();
         track_box_size_f = cv::Size2d();
         track_last_update_ms = 0;
+        track_last_detection_ms = 0;
         track_quality = 0.0;
         acquire_hit_frames = 0;
         suspicious_frames = 0;
@@ -1132,6 +1148,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         }
 
         track_last_update_ms = frameNowMs;
+        track_last_detection_ms = frameNowMs;
         track_quality = std::min(
             1.0,
             track_quality +
@@ -1171,21 +1188,41 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
             roi_frames_since_full_scan = 0;
         }
     } else {
+        bool canCoastThisFrame = false;
         if (have_track_model) {
             ++lost_target_frames;
             track_center_f = predictTrackCenter(frameNowMs);
             track_last_update_ms = frameNowMs;
             acquire_hit_frames = 0;
+            const double sinceDetectionMs =
+                track_last_detection_ms != 0 && frameNowMs >= track_last_detection_ms
+                    ? static_cast<double>(frameNowMs - track_last_detection_ms)
+                    : 0.0;
+            const bool withinCoastWindow =
+                app_config::kYoloTrackCoastEnabled &&
+                track_confirmed &&
+                track_last_detection_ms != 0 &&
+                lost_target_frames <= app_config::kYoloTrackCoastMaxFrames &&
+                sinceDetectionMs <= app_config::kYoloTrackCoastMaxMs;
+
             if (!suspiciousOnly) {
+                const double missDecay = withinCoastWindow
+                    ? app_config::kYoloTrackCoastQualityDecay
+                    : app_config::kYoloTrackQualityMissDecay;
                 track_quality = std::max(
                     0.0,
-                    track_quality - app_config::kYoloTrackQualityMissDecay
+                    track_quality - missDecay
                 );
             }
 
             last_target_center = roundPoint(track_center_f);
             last_target_box = filteredTrackBox();
             have_last_target = last_target_box.area() > 0;
+
+            canCoastThisFrame =
+                withinCoastWindow &&
+                have_last_target &&
+                track_quality >= app_config::kYoloTrackCoastMinQuality;
         }
 
         if (have_track_model &&
@@ -1194,17 +1231,43 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
         {
             resetTrackModel();
             roi_frames_since_full_scan = 0;
+            canCoastThisFrame = false;
         } else if (roiMode) {
             ++roi_frames_since_full_scan;
         } else {
             roi_frames_since_full_scan = 0;
         }
 
-        TargetManager::submitCameraMiss();
+        if (canCoastThisFrame && have_last_target) {
+            coastCenterForOverlay = clampPointToFrame(last_target_center, frame.size());
+            coastBoxForOverlay = last_target_box;
+            selectedCenter = &coastCenterForOverlay;
+            coastedThisFrame = true;
+
+            TargetManager::submitCameraPredictedTarget(coastCenterForOverlay,
+                                                       coastBoxForOverlay,
+                                                       frame.size());
+        } else {
+            TargetManager::submitCameraMiss();
+        }
     }
     last_inference_roi = inferenceRoi;
     latency_monitor::finishFrameWithoutSend(latencyToken);
     latency_monitor::clearCurrentCameraToken();
+
+    if (coastedThisFrame && coastBoxForOverlay.area() > 0) {
+        const cv::Scalar coastColor(0, 220, 255);
+        cv::rectangle(frame, coastBoxForOverlay, coastColor, 2, cv::LINE_AA);
+        cv::putText(frame,
+                    "COAST",
+                    cv::Point(coastBoxForOverlay.x,
+                              std::max(0, coastBoxForOverlay.y - 6)),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    coastColor,
+                    2,
+                    cv::LINE_AA);
+    }
 
     drawTrackingOverlay(frame, selectedCenter);
 
@@ -1232,6 +1295,7 @@ yolo_output my_yolo::run(cv::Mat &frame, double captureMs)
                       << " confirmed=" << (track_confirmed ? 1 : 0)
                       << " suspicious=" << suspicious_frames
                       << " lost=" << lost_target_frames
+                      << " coast=" << (coastedThisFrame ? 1 : 0)
                       << " kept=" << kept
                       << " selected=" << (selected >= 0 ? 1 : 0)
                       << std::endl;

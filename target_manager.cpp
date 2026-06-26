@@ -142,16 +142,13 @@ void refreshSourceAfterNonCameraEvent(uint64_t now, const char* reason)
     setActiveSource(TargetManager::Source::None, reason);
 }
 
-} // namespace
-
-void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Size& frameSize)
+void submitCameraTargetInternal(const cv::Point& center,
+                                const cv::Rect& targetBox,
+                                const cv::Size& frameSize,
+                                bool realDetection,
+                                const char* reason)
 {
-    submitCameraTarget(center, cv::Rect(), frameSize);
-}
-
-void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Rect& targetBox, const cv::Size& frameSize)
-{
-    updateMainCamSeen(true);
+    updateMainCamSeen(realDetection);
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -163,10 +160,29 @@ void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Rect& 
                              frameSize.width > 0 &&
                              frameSize.height > 0;
         ++g_camera.sequence;
-        setActiveSource(Source::Camera, "camera target");
+        setActiveSource(TargetManager::Source::Camera, reason);
     }
 
     AutoTracker::processTarget(center, targetBox, frameSize);
+}
+
+} // namespace
+
+void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Size& frameSize)
+{
+    submitCameraTarget(center, cv::Rect(), frameSize);
+}
+
+void TargetManager::submitCameraTarget(const cv::Point& center, const cv::Rect& targetBox, const cv::Size& frameSize)
+{
+    submitCameraTargetInternal(center, targetBox, frameSize, true, "camera target");
+}
+
+void TargetManager::submitCameraPredictedTarget(const cv::Point& center,
+                                                const cv::Rect& targetBox,
+                                                const cv::Size& frameSize)
+{
+    submitCameraTargetInternal(center, targetBox, frameSize, false, "camera coast");
 }
 
 void TargetManager::submitCameraMiss()
